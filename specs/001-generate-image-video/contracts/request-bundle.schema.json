@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.image-text-to-video/schemas/request-bundle.json",
+  "title": "RequestBundleManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request_id",
+    "state",
+    "created_at",
+    "completed_at",
+    "bundle_relative_path",
+    "artifacts",
+    "voice_origin",
+    "consent",
+    "language",
+    "models",
+    "parameters",
+    "memory_by_stage",
+    "plaintext_sensitive_artifacts",
+    "disk_bytes"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "request_id": {"type": "string", "format": "uuid"},
+    "state": {"const": "complete"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "bundle_relative_path": {
+      "type": "string",
+      "pattern": "^outputs/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 8,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/artifact"},
+      "allOf": [
+        {"contains": {"properties": {"kind": {"const": "original_image"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"kind": {"const": "reference_audio"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"kind": {"const": "derived_voice"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"kind": {"const": "speech"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"kind": {"const": "video_pre_lip"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"kind": {"const": "video_post_lip"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"kind": {"const": "final_mp4"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"kind": {"const": "metadata"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1}
+      ]
+    },
+    "voice_origin": {
+      "anyOf": [
+        {"$ref": "#/$defs/voiceOrigin"},
+        {"type": "null"}
+      ]
+    },
+    "consent": {"$ref": "#/$defs/consent"},
+    "language": {"type": "string", "minLength": 1, "maxLength": 80},
+    "models": {
+      "type": "array",
+      "minItems": 3,
+      "items": {"$ref": "#/$defs/effectiveModel"},
+      "allOf": [
+        {"contains": {"properties": {"role": {"const": "video"}}, "required": ["role"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "voice"}}, "required": ["role"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "lip_sync"}}, "required": ["role"]}, "minContains": 1, "maxContains": 1}
+      ]
+    },
+    "parameters": {"$ref": "#/$defs/parameters"},
+    "memory_by_stage": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/memorySnapshot"}
+    },
+    "plaintext_sensitive_artifacts": {"const": true},
+    "disk_bytes": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\:]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "relative_path", "media_type", "size_bytes", "sha256", "created_by_stage"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "original_image",
+            "reference_audio",
+            "derived_voice",
+            "speech",
+            "video_pre_lip",
+            "video_post_lip",
+            "final_mp4",
+            "metadata"
+          ]
+        },
+        "relative_path": {"$ref": "#/$defs/relativePath"},
+        "media_type": {"type": "string", "minLength": 1, "maxLength": 120},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "created_by_stage": {
+          "type": "string",
+          "enum": ["voice", "duration_plan", "video", "video_resample", "lip_sync", "native_composite", "mux", "verify", "metadata", "publish"]
+        }
+      }
+    },
+    "voiceOrigin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_id", "artifact_relative_path", "artifact_sha256"],
+      "properties": {
+        "bundle_id": {"type": "string", "format": "uuid"},
+        "artifact_relative_path": {"$ref": "#/$defs/relativePath"},
+        "artifact_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "consent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "reference_audio_sha256", "confirmed", "confirmed_at"],
+      "properties": {
+        "request_id": {"type": "string", "format": "uuid"},
+        "reference_audio_sha256": {"$ref": "#/$defs/sha256"},
+        "confirmed": {"const": true},
+        "confirmed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "effectiveModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "provider_mode", "repo_id", "commit", "adapter_key"],
+      "properties": {
+        "role": {"type": "string", "enum": ["video", "voice", "lip_sync"]},
+        "provider_mode": {"type": "string", "enum": ["native", "dedicated"]},
+        "repo_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "commit": {"type": "string", "pattern": "^[A-Fa-f0-9]{40}$"},
+        "adapter_key": {"type": "string", "minLength": 1, "maxLength": 120}
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "effective_seed",
+        "preferred_num_frames",
+        "preferred_fps",
+        "effective_num_frames",
+        "effective_fps",
+        "final_num_frames",
+        "final_fps",
+        "guidance_scale",
+        "speech_duration_seconds",
+        "video_duration_seconds",
+        "runtime_profile"
+      ],
+      "properties": {
+        "effective_seed": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "preferred_num_frames": {"type": "integer", "minimum": 1},
+        "preferred_fps": {"type": "number", "exclusiveMinimum": 0},
+        "effective_num_frames": {"type": "integer", "minimum": 1},
+        "effective_fps": {"type": "number", "exclusiveMinimum": 0},
+        "final_num_frames": {"type": "integer", "minimum": 1},
+        "final_fps": {"type": "number", "exclusiveMinimum": 0},
+        "guidance_scale": {"type": "number"},
+        "speech_duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "video_duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "runtime_profile": {"type": "string", "minLength": 1, "maxLength": 120}
+      }
+    },
+    "memorySnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "device_name": {"type": ["string", "null"], "maxLength": 200},
+        "allocated_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "reserved_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "peak_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "unavailable_reason": {"type": ["string", "null"], "maxLength": 300}
+      }
+    }
+  }
+}
