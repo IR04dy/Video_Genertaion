@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.image-text-to-video/schemas/model-source.json",
+  "title": "ModelSourceInput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["url", "requested_role"],
+  "properties": {
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "maxLength": 500,
+      "pattern": "^https://huggingface\\.co/[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(?:/tree/[A-Fa-f0-9]{40})?/?$"
+    },
+    "requested_role": {
+      "type": "string",
+      "enum": ["video", "voice", "lip_sync"]
+    },
+    "requested_revision": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9._/-]+$"
+    }
+  }
+}

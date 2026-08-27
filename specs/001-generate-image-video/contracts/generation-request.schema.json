@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.image-text-to-video/schemas/generation-request.json",
+  "title": "GenerationRequestInput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "image_path",
+    "motion_prompt",
+    "speech_script",
+    "reference_audio_path",
+    "language",
+    "voice_consent_confirmed",
+    "model_set",
+    "num_frames",
+    "fps",
+    "guidance_scale",
+    "runtime_profile"
+  ],
+  "properties": {
+    "image_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "motion_prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "pattern": ".*\\S.*"
+    },
+    "speech_script": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "pattern": ".*\\S.*"
+    },
+    "reference_audio_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reference_transcript": {
+      "type": ["string", "null"],
+      "maxLength": 4000
+    },
+    "language": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "voice_consent_confirmed": {
+      "const": true
+    },
+    "model_set": {
+      "$ref": "#/$defs/modelSet"
+    },
+    "seed": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "num_frames": {
+      "type": "integer",
+      "minimum": 25,
+      "maximum": 49,
+      "default": 49
+    },
+    "fps": {
+      "type": "integer",
+      "minimum": 7,
+      "maximum": 16,
+      "default": 8
+    },
+    "guidance_scale": {
+      "type": "number",
+      "minimum": 1.0,
+      "maximum": 10.0,
+      "default": 6.0
+    },
+    "runtime_profile": {
+      "type": "string",
+      "enum": [
+        "production",
+        "cuda-quantized",
+        "mps-experimental",
+        "cpu-experimental",
+        "stub"
+      ]
+    }
+  },
+  "$defs": {
+    "modelId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "providerMode": {
+      "type": ["string", "null"],
+      "enum": ["native", "dedicated", null]
+    },
+    "modelSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["video_model_id"],
+      "properties": {
+        "video_model_id": {
+          "$ref": "#/$defs/modelId"
+        },
+        "voice_model_id": {
+          "anyOf": [
+            {"$ref": "#/$defs/modelId"},
+            {"type": "null"}
+          ]
+        },
+        "lip_sync_model_id": {
+          "anyOf": [
+            {"$ref": "#/$defs/modelId"},
+            {"type": "null"}
+          ]
+        },
+        "voice_provider": {
+          "$ref": "#/$defs/providerMode"
+        },
+        "lip_sync_provider": {
+          "$ref": "#/$defs/providerMode"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"voice_provider": {"const": "dedicated"}},
+            "required": ["voice_provider"]
+          },
+          "then": {
+            "required": ["voice_model_id"],
+            "properties": {"voice_model_id": {"$ref": "#/$defs/modelId"}}
+          }
+        },
+        {
+          "if": {
+            "properties": {"lip_sync_provider": {"const": "dedicated"}},
+            "required": ["lip_sync_provider"]
+          },
+          "then": {
+            "required": ["lip_sync_model_id"],
+            "properties": {"lip_sync_model_id": {"$ref": "#/$defs/modelId"}}
+          }
+        }
+      ]
+    }
+  }
+}
