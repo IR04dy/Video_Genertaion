@@ -162,18 +162,37 @@ def stage_load(report: Report, model_path: str, quant: str) -> Any:
 
     kwargs: dict[str, Any] = {"dtype": torch.bfloat16}
     if quant != "none":
-        from diffusers import BitsAndBytesConfig
+        # Two different BitsAndBytesConfig classes, deliberately. `text_encoder` is a
+        # Transformers model (Qwen3VLForConditionalGeneration) whose from_pretrained
+        # type-checks the config against transformers' own class; `transformer_ref` is a
+        # Diffusers model checked against Diffusers'. One class for both fails with
+        # "Found `quant_method=bitsandbytes` but `quantization_config` is not a
+        # `BitsAndBytesConfig`" — same name, different class, and the message never says so.
+        from diffusers import BitsAndBytesConfig as DiffusersBnbConfig
+        from transformers import BitsAndBytesConfig as TransformersBnbConfig
 
-        if quant == "int4":
-            kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.bfloat16,
-                bnb_4bit_quant_type="nf4",
-            )
-        elif quant == "int8":
-            kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
-        else:
+        def _config(cls: Any) -> Any:
+            if quant == "int4":
+                return cls(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_quant_type="nf4",
+                )
+            if quant == "int8":
+                return cls(load_in_8bit=True)
             raise SystemExit(f"unknown --quant {quant!r}")
+
+        # Per component, not global. `load_components` reads a dict value as
+        # {component_name: value} with an optional "default"; a component named in
+        # neither is passed no quantization_config at all. The VAEs are absent on
+        # purpose: they are convolutional, bitsandbytes quantizes Linear layers only, and
+        # quantizing them earns "no linear modules were found in your model" and zero
+        # saving. Only the two ~62 GiB transformers are worth quantizing. Names are
+        # ref2va's: this workflow denoises through `transformer_ref`, not `transformer`.
+        kwargs["quantization_config"] = {
+            "text_encoder": _config(TransformersBnbConfig),
+            "transformer_ref": _config(DiffusersBnbConfig),
+        }
 
     started = time.monotonic()
     pipe = MiniMaxH3ModularPipeline.from_pretrained(
@@ -291,6 +310,12 @@ def main() -> int:
 
     for stage in wanted:
         print(f"--- {stage} ---", flush=True)
+        # Written BEFORE the work starts. Every stage records its findings on
+        # completion, which leaves a multi-hour download entirely unrecorded: a
+        # process killed below the interpreter (native crash, closed console)
+        # writes nothing at all, and an empty report cannot be told apart from a
+        # run that never began. This marker makes that distinction visible.
+        report.record(stage, started_at=time.strftime("%Y-%m-%dT%H:%M:%S"), ok=None)
         try:
             if stage == "metadata":
                 pipe = stage_metadata(report, args.model_path)
