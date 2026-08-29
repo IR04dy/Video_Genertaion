@@ -4,43 +4,44 @@
   "title": "GenerationRequestInput",
   "type": "object",
   "additionalProperties": false,
+  "description": "Every model-specific bound (duration, frame rate, resolution, audio sample rate, language set, reference limits, prompt token capacity) belongs to the effective adapter profile and is deliberately absent from this schema.",
   "required": [
-    "image_path",
+    "image_paths",
     "motion_prompt",
     "speech_script",
     "reference_audio_path",
     "language",
     "voice_consent_confirmed",
     "model_set",
-    "preferred_num_frames",
-    "preferred_fps",
-    "guidance_scale",
     "runtime_profile"
   ],
   "properties": {
-    "image_path": {
-      "type": "string",
-      "minLength": 1
+    "image_paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1},
+      "description": "One or more still images anchoring subject identity and appearance, all of the same subject. No maximum is fixed here; the effective adapter profile's measured reference limit is the only bound. Exactly one audio reference is accepted; video references are rejected on token cost."
     },
     "motion_prompt": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 2000,
+      "description": "Trimmed and non-empty; no application maximum. Text beyond the effective video adapter's text-encoder capacity is truncated and reported as an explicit override, never silently.",
       "pattern": ".*\\S.*"
     },
     "speech_script": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 2000,
+      "description": "Trimmed and non-empty; no application maximum and never refused for length. Carried into the prompt as dialogue tags with the selected language, and used with the profile's per-language speaking rate to suggest a duration. Never trimmed, time-stretched, truncated, or partially omitted by the application.",
       "pattern": ".*\\S.*"
     },
     "reference_audio_path": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "Voice TIMBRE ANCHOR only. Never played back, never mixed into the output, never treated as spoken content. Should say different words from the speech script; the UI surfaces this rule."
     },
     "reference_transcript": {
       "type": ["string", "null"],
-      "maxLength": 4000
+      "minLength": 1
     },
     "language": {
       "type": "string",
@@ -58,29 +59,20 @@
       "minimum": 0,
       "maximum": 9223372036854775807
     },
-    "preferred_num_frames": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 10000,
-      "default": 49
-    },
-    "preferred_fps": {
-      "type": "number",
+    "preferred_duration_seconds": {
+      "type": ["number", "null"],
       "exclusiveMinimum": 0,
-      "maximum": 240,
-      "default": 8
+      "description": "Operator override for the suggested duration. When null, the suggestion derived from script length and the profile's per-language speaking rate is used. Must fall inside the profile's measured supported range; this schema deliberately encodes no duration bounds of its own, and no request is refused for script length."
     },
     "guidance_scale": {
-      "type": "number",
-      "minimum": 0,
-      "maximum": 100,
-      "default": 6.0
+      "type": ["number", "null"],
+      "description": "Validated against the effective adapter profile's declared bounds, not against any value fixed here."
     },
     "runtime_profile": {
       "type": "string",
       "enum": [
         "production",
-        "cuda-quantized",
+        "cuda-highmem",
         "mps-experimental",
         "cpu-experimental",
         "stub"

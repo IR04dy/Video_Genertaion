@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Test and type caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local model weights and generated media
+.model-cache/
+outputs/*
+!outputs/.gitkeep
+
+# Configuration
+.env
+
+# OS
+.DS_Store
+Thumbs.db

@@ -6,9 +6,11 @@ project or vendor documentation reviewed on 2026-08-27.
 ## Capability registry for user-provided model links
 
 **Decision**: Accept canonical Hugging Face repository links, resolve them to immutable commit SHAs,
-and mark a model ready only when repository metadata matches a reviewed adapter/worker fingerprint.
-The adapter declares roles (`video`, `voice`, `lip_sync`), native capabilities, inputs/outputs,
-language/audio constraints, devices, precision, memory profile, and allowed weight formats.
+and mark a model ready only when repository metadata matches a reviewed adapter fingerprint. The adapter
+declares its roles and whether voice and lip synchronization are native, plus inputs/outputs, accepted
+reference types and limits, supported duration range, frame rate, resolution, audio sample rate, dialogue
+languages, prompt token capacity, devices, precision, offload and quantization policy, accelerator and
+host memory profile, and allowed weight formats. Every one of these is a measured profile field.
 
 **Rationale**: User-selected repositories cannot safely or reliably map to one generic call signature.
 Diffusers auto-pipelines select classes from repository configuration, but image-to-video architectures
@@ -17,128 +19,234 @@ Hub code. Source: [Diffusers pipeline overview](https://huggingface.co/docs/diff
 
 **Alternatives considered**: `trust_remote_code=True` was rejected as incompatible with the security
 requirement. Accepting any model tagged image-to-video was rejected because tags do not prove interface,
-memory, voice, or lip-sync compatibility.
+memory, voice, or lip-sync compatibility. Baking any one model's duration, frame rate, or token limit
+into shared code was rejected outright: the previous stack encoded 49 frames, 8 FPS, and a 226-token
+prompt capacity as global truths, and every one of those had to be unpicked when the model changed.
 
-## Reference image-to-video adapter
+## Reference joint audio/video adapter
 
-**Decision**: Use `zai-org/CogVideoX-5b-I2V` with the Diffusers 0.40.x
-`CogVideoXImageToVideoPipeline` only as a fixed reviewed video profile: 720x480, 49 generated frames,
-8 FPS, guidance 6, BF16, and English motion prompts. Do not advertise arbitrary temporal combinations.
+**Decision**: Use `MiniMaxAI/MiniMax-H3` in its **Ref2VA** (omni-reference) mode as the default reviewed
+video profile, generating video and stereo audio jointly in one invocation. Load it through the official
+Diffusers/Transformers classes with `trust_remote_code=False`. Retire the separate text-to-speech and
+lip-synchronization providers entirely.
 
-**Rationale**: The official card and tagged pipeline source cover image plus English text prompt, BF16,
-seeded generation, 49 frames, 720x480, VAE slicing/tiling, and 8-FPS export. The card's lowest memory
-figure assumes sequential CPU offload plus all listed VAE optimizations and was measured on A100/H100,
-so RTX 5080 fit remains an empirical release gate below 15.5 GiB rather than an assumed fact. Sources:
-[Diffusers 0.40 pipeline source](https://github.com/huggingface/diffusers/blob/v0.40.0/src/diffusers/pipelines/cogvideo/pipeline_cogvideox_image2video.py) and
-[CogVideoX-5B-I2V model card](https://huggingface.co/zai-org/CogVideoX-5b-I2V).
+**Rationale**: H3 is an omni-modal system that produces synchronized video and native stereo audio from a
+multimodal reference context. Because the mouth movement and the voice are predicted together by one
+model, the previous three-provider pipeline collapses to a single stage. That removes the cross-provider
+timebase bridge, the post-generation face preflight, the speech-first ordering constraint, the model
+lease choreography between heavyweight providers, and the isolated worker process that existed only
+because two providers pinned conflicting dependency stacks. Source:
+[MiniMax-H3 model card](https://huggingface.co/MiniMaxAI/MiniMax-H3).
 
-**Alternatives considered**: Re-exporting 49 frames at arbitrary FPS was rejected as proof of model-
-supported duration because it merely retimes the trained motion. CogVideoX1.5's discrete 81/161-frame
-profiles and other I2V models may be added as separate adapters after memory/interface tests. Generic
-auto-loading remains an implementation helper only after registry matching.
+**Measured profile fields** (all recorded per adapter, never as architecture constants):
 
-## Reference voice-cloning adapter
+| Field | Value from the model card |
+|-------|---------------------------|
+| Output duration | 4-15 s (**target 6-10 s; the ceiling is measured on the RTX 5080, not assumed**) |
+| Output frame rate | 24 FPS |
+| Output resolution | Short side 768 by default; 2K only via H3-Regenerate-2K |
+| Output audio | 32 kHz stereo |
+| Dialogue languages | 11 with stable support: Arabic, Chinese, English, French, German, Italian, Japanese, Korean, Portuguese, Russian, Spanish |
+| Ref2VA references | Images `<= 9`; audio `<= 3` clips of 2-15 s each; `<= 12` files total |
+| Precision | BF16; released weights are CFG-distilled |
 
-**Decision**: Use `Qwen/Qwen3-TTS-12Hz-1.7B-Base` with `qwen-tts==0.1.1`,
-`transformers==4.57.3`, and `accelerate==1.12.0`. Use its x-vector-only voice-cloning path because the
-specified UI has no required reference transcript, but disclose in provider constraints and metadata
-that the official ICL path with a matching transcript may clone more faithfully.
+**Alternatives considered**: CogVideoX-5B-I2V plus Qwen3-TTS plus LatentSync 1.5 was the previous stack.
+It fitted the card comfortably but produced only 6.125 s per generation, which forced either a
+ping-pong loop with visibly repeating motion or chained generation with identity drift, and it required a
+separately locked worker process to reconcile conflicting dependency pins. LTX-2.5 and Wan 2.2 were
+considered as longer-duration single-video alternatives but do not generate voice-cloned speech jointly,
+so they would have retained the multi-provider architecture.
 
-**Rationale**: The official model supports voice cloning from reference audio, exposes a supported
-language list, covers ten major languages, accepts local paths or waveform/sample-rate tuples, uses
-safetensors, and can create an x-vector-only prompt without a reference transcript. The official
-`qwen-tts` 0.1.1 package pins Transformers 4.57.3 and Accelerate 1.12.0, so the application must test
-and lock the complete Diffusers/Qwen environment rather than independently upgrading either library.
-The 1.7B provider is loaded only for speech synthesis and unloaded before video inference. Sources:
-[Qwen3-TTS Base model card](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) and
-[Qwen3-TTS official repository](https://github.com/QwenLM/Qwen3-TTS), including its
-[package metadata](https://github.com/QwenLM/Qwen3-TTS/blob/main/pyproject.toml).
+## No remote code required — via the root modular layout, not `Ref2VA/`
 
-**Alternatives considered**: Qwen3-TTS 0.6B Base is a lower-memory fallback adapter candidate, but the
-1.7B model is the quality-oriented reference profile. CustomVoice and VoiceDesign checkpoints were
-rejected because they do not satisfy user-provided reference-voice cloning in the same way. Other
-voice stacks remain eligible only through reviewed adapters with the same speech-artifact contract.
+**Decision**: Load H3 through the repository root's `modular_model_index.json` as a
+`MiniMaxH3ModularPipeline`, selecting the `ref2va` workflow, with `trust_remote_code=False`. Do **not**
+load the `Ref2VA/` subfolder.
 
-## Reference lip-sync adapter
+**Rationale**: The repository ships two loading paths for the same weights, and only one of them is
+usable under the constitutional prohibition on remote code.
 
-**Decision**: Use a reviewed, commit-pinned `ByteDance/LatentSync-1.5` adapter in a separately locked
-local worker. Pin the 1.5-compatible code/config and every auxiliary VAE/Whisper source; use the official
-FP16, 256px, 25-FPS/16-kHz inference profile. Resample CogVideoX's complete 8-FPS video to 25 FPS while
-preserving duration before the worker. Do not enable LatentSync 1.6 on the 16 GB target.
+`Ref2VA/model_index.json` names `MiniMaxH3Pipeline`, `MiniMaxH3DiTModel`, `MiniMaxH3VideoVAE`,
+`MiniMaxH3AudioVAE`, and `MiniMaxH3Qwen3VLHFEncoder`. **No upstream Diffusers or Transformers release
+exports any of those names**; they belong to a MiniMax fork, which its `"_diffusers_version": "0.32.2"`
+stamp reflects. Worse, `Ref2VA/video_vae/config.json` and `Ref2VA/audio_vae/config.json` each carry an
+`auto_map` pointing at bundled `.py` modules shipped beside the weights, so that path requires
+`trust_remote_code=True` by construction.
 
-**Rationale**: The project documents 8 GB minimum inference VRAM for 1.5 and 18 GB for 1.6, but the
-8 GB value is only a lower bound. Its official environment pins older, mutually incompatible Torch,
-Diffusers, Transformers, and Accelerate versions and contains CUDA/Linux assumptions. Process isolation
-keeps Qwen's exact pins coherent, while the worker's Blackwell port and peak memory remain Windows
-release gates. LatentSync does not infer input FPS reliably, so the explicit 25-FPS bridge prevents it
-from treating a 49-frame/8-FPS clip as a short 25-FPS clip. The adapter dependency manifest includes
-the exact `stabilityai/sd-vae-ft-mse` commit and the selected local Whisper checkpoint/digest instead of
-allowing the upstream repo-ID load to contact the network. Sources:
-[LatentSync official repository](https://github.com/bytedance/LatentSync) and
-[LatentSync 1.5 model repository](https://huggingface.co/ByteDance/LatentSync-1.5).
+The repository root describes the same checkpoint in upstream Diffusers' modular format, naming only
+classes the released wheels genuinely export, and its component directories contain **no `.py` files and
+no `auto_map`**:
 
-**Alternatives considered**: A single Python environment was rejected because provider pins conflict.
-An unmodified upstream environment was rejected because its legacy CUDA wheel is not the production
-Blackwell baseline. LatentSync 1.6 exceeds the target VRAM. Other lip-sync providers remain
-eligible through reviewed adapters after their interfaces, face requirements, artifact contract, and
-target memory profile are validated. Native audio-driven video models remain supported through the
-composite adapter protocol when their manifests pass validation.
+| Component | Library | Class |
+|---|---|---|
+| pipeline | diffusers | `MiniMaxH3ModularPipeline` (blocks `MiniMaxH3Blocks`) |
+| transformer_ref | diffusers | `MiniMaxH3Transformer3DModel` |
+| vae | diffusers | `AutoencoderKLMiniMaxH3` |
+| audio_vae | diffusers | `AutoencoderKLMiniMaxH3Audio` |
+| scheduler, audio_scheduler | diffusers | `MiniMaxH3Scheduler` |
+| text_encoder | transformers | `Qwen3VLForConditionalGeneration` |
+| tokenizer | transformers | `Qwen2TokenizerFast` |
+| processor | transformers | `Qwen3VLProcessor` |
 
-## Native and dedicated provider resolution
+Verified against `diffusers==0.40.0` and `transformers==5.16.1`: all nine resolve. The prohibition on
+remote code therefore holds with no exception — but only because the loading path changed.
 
-**Decision**: Compile the selected model set into a speech-first artifact dependency graph. A model
-may provide one or more roles. If native and dedicated providers overlap, require the user's explicit
-selection for that role. Every accepted plan produces and validates the complete speech artifact
-first, derives a supported frame-count/FPS combination from its exact duration, and only then runs
-video generation and lip synchronization. A native composite adapter may fuse the later stages, but
-it must expose speech as a completed first phase before allocating the video stage.
+This entry supersedes an earlier one that read the absence of a `custom_pipeline` key in
+`Ref2VA/model_index.json` as proof that no remote code was involved. That inference was wrong:
+`auto_map` inside a *component* config is the other, more common way a repository ships executable code,
+and it was not checked.
 
-**Rationale**: Speech duration is authoritative and may make the selected video adapter infeasible.
-Resolving duration before video allocation prevents trimming/time-stretching and avoids expensive
-generation that cannot contain the full speech. An explicit graph preserves user choice, validates
-complete coverage, and guarantees sequential heavy-model residency.
+**Alternatives considered**: Granting a scoped `trust_remote_code` exception for the `Ref2VA/` VAEs was
+rejected — the root path obtains the same weights with no exception at all. Vendoring the two VAE modules
+into the repository was rejected as a maintenance burden that a supported upstream path makes pointless.
 
-**Alternatives considered**: Video-first ordering was rejected because duration cannot be planned from
-the finished speech. Native-first and dedicated-first implicit priorities were rejected by
-clarification. Automatic benchmark-based selection was rejected because it changes behavior and
-reproducibility without user intent.
+## Fitting a 33B omni-model into 16 GB VRAM and 64 GB RAM
 
-## Duration planning and cross-provider timebases
+**Decision**: Run the production profile with a reviewed quantized checkpoint plus layer-wise/sequential
+CPU offload, gate on **both** a 13.5 GiB peak allocator-reserved accelerator ceiling and a configured host
+system-memory ceiling, and treat resident footprint per precision as a measured release value.
 
-**Decision**: Separate a static `ExecutionBlueprint` from the post-speech `EffectiveExecutionPlan`.
-For each reviewed video profile, enumerate only documented `(generated_frames, playback_fps)` candidates
-and compute clip duration as `generated_frames / playback_fps`. A candidate is accepted only when the
-full verified speech differs by no more than one effective final frame after any declared lip-provider
-bridge. Tie-break deterministically by smallest duration delta, then closest requested frame preference,
-then closest requested FPS, then the profile's stable candidate order.
+**Rationale**: The transformer is 33B dense, but roughly 13B of that sits in AdaLN branches whose
+modulation outputs can be precomputed and cached, so those parameters need not be loaded for
+inference-only deployment -- approximately 20B effective. The text encoder additionally carries
+Qwen3-VL-32B weights and consumes only its 50th-layer hidden states, so a truncated load is possible.
+Neither saving is safe to assume; both are load-time engineering decisions with large memory consequences
+and belong in measured gates. Host RAM becomes a first-class budget because layer-wise offload keeps the
+resident model in system memory and streams it to the card: at BF16 the model does not fit 64 GB, while at
+INT8 it does comfortably, which is why a quantized checkpoint is an expected part of the production
+profile rather than a fallback. Sparse attention is **not** in the initial open-source release, so
+inference is full-attention only and memory grows with the packed multimodal sequence -- a direct argument
+for the low end of the duration range.
 
-The reference CogVideoX profile has the single candidate `(49, 8)`. Its video is resampled to LatentSync
-1.5's 25-FPS processing/final timebase with duration preserved and no frame deletion; the effective
-final frame count is derived and recorded. If the complete speech cannot meet the final one-frame
-tolerance, stop before CogVideoX inference. Never change speech rate, trim it, or omit content.
+**Alternatives considered**: BF16 without offload is impossible on 16 GB. The model card's SGLang example
+uses `--num-gpus 4 --ulysses-degree 4`, but that is a speed-mode deployment recipe, not a stated minimum,
+and single-GPU offloaded inference is the supported trade of latency for capacity. Multi-GPU was rejected
+because the target machine has one card.
 
-**Rationale**: FPS is not an inference argument for the fixed CogVideoX model, while LatentSync assumes
-its supplied video FPS. Modeling both timebases prevents an export preference from being mistaken for
-model capability and makes the final mux tolerance testable.
+**Measured checkpoint sizes** (from the Hub blob listing, root layout, BF16):
 
-**Alternatives considered**: Treating arbitrary export FPS as a CogVideoX duration range, generating
-video before speech, or silently truncating/looping frames in LatentSync were rejected.
+| Component | Size | Needed by `ref2va` |
+|---|---:|---|
+| `text_encoder` (Qwen3-VL) | 62.13 GiB | yes, truncated at `text_encoder_layer` |
+| `transformer_ref` | 61.73 GiB | yes |
+| `transformer` | 61.73 GiB | **no** — `fl2va`/`t2va` only |
+| `vae` | 9.70 GiB | yes |
+| `audio_vae` | 0.56 GiB | yes |
+| **`ref2va` working set** | **134.12 GiB** | |
 
-## CUDA memory and quantization policy
+Two consequences. First, `MiniMaxH3ModularPipeline.load_components(workflow="ref2va")` loads only the
+components that workflow's blocks use, which excludes the 61.73 GiB `transformer` entirely; loading the
+whole repository instead would waste that on every run. Second, 134 GiB of BF16 weights against a 64 GB
+host ceiling makes quantization **mandatory rather than expected** — roughly INT4 to be resident, and even
+INT8 does not fit. The earlier claim in this section that "at INT8 it does comfortably" was written before
+these sizes were measured and is wrong; INT8 lands near 67 GiB, above the ceiling. The precision that
+actually fits is a spike measurement, not a planning assumption.
 
-**Decision**: Prefer BF16 in the main CUDA runtime and use LatentSync's reviewed FP16 worker. Enable
-CogVideoX sequential CPU offload plus VAE slicing/tiling as the conservative 16 GB reference path,
-maintain one loaded heavy provider/process, and release between stages. Treat peak allocated memory
-below 15.5 GiB for every stage as a measured release gate. A faster model-offload profile or reviewed
-component quantization is enabled only after separate RTX 5080 acceptance.
+The checkpoint declares its own limits as pipeline properties — `fps`, `min_duration`, `max_duration`,
+`audio_sampling_rate`, `audio_channels`, `canvas_multiple`, `text_encoder_layer` — so `ModelProfile` reads
+them from the loaded pipeline rather than restating them. That is the mechanism which keeps measured
+values out of shared code.
 
-**Rationale**: Diffusers documents VAE slicing/tiling and model/sequential offload as memory controls;
-its CogVideoX guidance reports a material reduction with offload and tiling. Source:
-[Diffusers memory optimization](https://huggingface.co/docs/diffusers/optimization/memory).
+## Unbounded inference time
 
-**Alternatives considered**: Whole-pipeline CUDA residency risks OOM. Sequential CPU offload is a
-slower recovery profile, not a hidden default. Compilation and FlashAttention remain opt-in until the
-base RTX 5080 path is measured and compatibility-tested.
+**Decision**: Impose no latency target, SLA, maximum runtime, runtime estimate, or cost-confirmation gate.
+Record measured wall-clock time as a baseline only.
+
+**Rationale**: Layer-wise offload of a 20B-effective model on a 16 GB card trades time for feasibility by
+design; a run taking hours is the expected operating point, not a fault. The constitution requires bounded
+*allocation* and reproducible parameters, which the dual ceilings and recorded effective profile preserve.
+Bounding wall-clock time would either fail correct runs or force a smaller model.
+
+**Alternatives considered**: A configurable timeout was rejected because any threshold would be arbitrary
+and would abort valid work. Runtime estimation was rejected because offloaded throughput varies too widely
+to estimate honestly.
+
+## Reference semantics: image plus voice timbre anchor
+
+**Decision**: Accept one or more still images anchoring subject identity and appearance, plus exactly one
+audio recording used solely as a **voice timbre anchor**. Impose no application maximum on image count --
+the profile's measured reference limit is the only bound. Reject video references.
+Carry spoken content in the prompt as `<d>[language]...</d>` dialogue tags built from the speech script.
+
+**Rationale**: `<d>` is a real special token added to the H3 tokenizer configuration, so dialogue content
+belongs in the prompt rather than in an audio reference. The reference recording conditions timbre only:
+it is never played back, never mixed into the output, and never treated as spoken content, which is why
+it **must say different words from the script** -- a rule surfaced in the UI at the point of upload.
+Video references are excluded on token cost: a 15 s, 1280x768, 24 FPS clip costs roughly 86,000 tokens on
+its own under the f16t4d24 latent design with 1x2x2 patchify, which breaches the memory ceiling before
+generation starts.
+
+**Alternatives considered**: Supplying the script as reference audio was rejected because it inverts the
+model's design and would make the reference both timbre and content. Allowing video references was
+rejected on the token arithmetic above, despite the profile permitting up to three clips. Capping images
+at one was rejected as a carryover from the previous single-conditioning-frame image-to-video stage: it is
+not a property of the omni-reference mode, and additional views of the same subject are the cheapest
+available lever on identity stability.
+
+## Locally built prompt structuring
+
+**Decision**: Build prompt assembly inside the application from the published Prompting Guidance, and
+retain the assembled prompt actually submitted in every successful bundle.
+
+**Rationale**: H3-Context-IR -- the module the model card credits with much of the output quality -- is
+**not** part of the open-source release and is offered only as a hosted API. Local-only operation forbids
+calling it, so the application must do its own instruction parsing and context serialization. Retaining
+the exact assembled prompt keeps results explainable and lets the structuring improve without changing any
+contract. This is a recorded quality risk, not a solved problem.
+
+**Alternatives considered**: Calling the hosted H3-Context-IR API was rejected as incompatible with local
+operation and with the no-network-during-inference rule. Passing raw user text straight through was
+rejected because the model card explicitly attributes quality loss to unstructured context.
+
+## Local output ceiling of 768p
+
+**Decision**: Treat 768p short side as the maximum local output resolution and place 2K out of scope.
+
+**Rationale**: H3-Regenerate-2K is not open-sourced and is reachable only through the hosted API, which
+local operation forbids. Claiming 2K support would be false for this deployment.
+
+**Alternatives considered**: A conventional external super-resolution pass was rejected for v1; it is a
+different model with its own review, memory profile, and quality characteristics.
+
+## Duration selection and script fit
+
+**Decision**: Produce every request from exactly one generation. Because audio and video are generated
+jointly, duration is an **input** to that generation, not a measurement taken from synthesized speech.
+Derive a suggested duration from the trimmed script and a per-language speaking-rate field in the adapter
+profile, clamp it to the profile's supported range, and let the operator override it anywhere in that
+range. Perform no pre-generation script-fit check and never reject a request for script length. Never
+trim, time-stretch, truncate, or partially omit speech.
+
+**Rationale**: The previous stack could measure speech because a dedicated text-to-speech stage produced
+it before video planning. That stage no longer exists, so "does this script fit?" is not a question the
+system can answer before generating. A soft, overridable suggestion is honest about that; a hard reject
+gate would assert a measurement the architecture cannot take. Per-character speaking rate varies several
+fold across the profile's languages, which is survivable in a default and was fatal in the old
+110-character cap precisely because that cap was a hard gate.
+
+**Alternatives considered**: Rejecting over-long scripts was rejected as unverifiable before generation.
+Verifying delivery afterwards with speech recognition was rejected for v1: it needs its own model, memory
+budget, and language coverage, and only reports failure after a multi-hour run. Always requesting the
+profile maximum was rejected as the most expensive option on every request. Ping-pong looping of a base
+clip, chained continuation, and concatenated
+independent clips were all viable when audio was produced separately and muxed. None survive joint
+generation: a clip whose speech is baked in cannot be repeated, reversed, or spliced without corrupting
+the audio. Splitting a long script across several generations and concatenating them was rejected for v1
+because it reintroduces multi-generation cost, cross-clip identity drift, and audio seams.
+
+## Motion-prompt capacity and truncation reporting
+
+**Decision**: Impose no application maximum on the motion prompt. Record each video adapter's text-encoder
+capacity in its profile as a measured value. When a prompt exceeds it, truncate to capacity and record the original,
+retained, and discarded lengths as an explicit override surfaced in the UI and in request metadata.
+
+**Rationale**: The pipeline truncates internally regardless, so the only real choice is whether the user
+is told. Reporting it as an override matches how duration and parameter overrides are already handled and
+preserves the rule that no effective parameter changes silently. Truncating a conditioning prompt costs
+quality only, unlike truncating speech, which would violate a functional requirement.
+
+**Alternatives considered**: Rejecting overlong prompts reintroduces a limit the clarification removed.
+Passing them through unchecked leaves metadata recording a prompt that was not the one actually used.
 
 ## GGUF and heavyweight models
 
@@ -181,7 +289,7 @@ and remote attention kernels; set `trust_remote_code=False` on every loader and
 `DIFFUSERS_DISABLE_REMOTE_CODE=true` before importing Diffusers. Credentials come only from `HF_TOKEN`
 or the local `hf auth login` store and never enter UI/domain/inventory/log fields.
 
-LatentSync 1.5's reviewed `.pt` weight is an explicit exception to the general safetensors policy only
+A reviewed non-safetensors weight is an explicit exception to the general safetensors policy only
 when repository commit and SHA-256 match the adapter fingerprint and the safest supported tensor-only
 loader is used. All other pickle-bearing/unreviewed executable artifacts fail closed.
 
@@ -212,7 +320,10 @@ application inspect, display, record, acknowledge, or enforce license informatio
 **Decision**: Resolve CUDA, then MPS, then CPU, intersected with selected adapter capabilities. Use
 PyTorch 2.13.0's official CUDA 13.0 Windows wheels for RTX 5080 production with NVIDIA driver 580.88+
 and verify `torch.cuda.is_available()`, RTX 5080 identity, CUDA 13.0 build, compute capability 12.0,
-compiled `sm_120` support when exposed, and BF16/FP16 allocations before model-content download.
+compiled `sm_120` support when exposed, and BF16/FP16 allocations before model-content download. Also
+measure installed and available **host system memory** at startup and record it alongside accelerator
+capacity: the target machine has 64 GB, and layer-wise offload makes host RAM a gating resource rather
+than an incidental one.
 
 **Rationale**: PyTorch 2.13 keeps CUDA 13.0 as the default build and removes standard CUDA 12.8/12.9
 builds; PyTorch's 2.12 guidance directs Blackwell users to CUDA 13.0+ and a 580.88+ Windows driver.
@@ -229,19 +340,22 @@ rejected because it can multiply latency.
 **Decision**: Store audio formats, duration, sample rate/channels, speaker conditions, optional
 transcript rule, quality bounds, and languages in each voice profile. Display those constraints before
 submission and validate locally. Require an explicit consent checkbox for every request and exactly
-one face/mouth target before video generation, using the effective lip provider's preflight analyzer.
+one face/mouth target before video generation. After video inference, run the effective lip provider's
+lightweight detector/tracker across generated frames and require one consistent usable target before
+starting generation.
 
 **Rationale**: The user chose provider-specific audio limits and explicit language. Performing consent,
 face, and audio validation before loading models prevents expensive invalid work and records the safety
-decision at the request boundary.
+decision at the request boundary. No post-generation face pass is needed, because mouth movement is
+produced jointly with the audio by the same model rather than applied to an already-generated clip.
 
 **Alternatives considered**: One universal audio limit was rejected by clarification. Automatic
 language detection and multi-face selection are explicitly out of scope.
 
 ## Lip-sync publication policy
 
-**Decision**: Treat adapter exceptions, absent face output, invalid media, silent speech, or failed
-muxing as technical failures. Do not compute or enforce a lip-sync quality score in v1; every
+**Decision**: Treat adapter exceptions, invalid media, silent generated speech, or failed container
+export as technical failures. Do not compute or enforce a lip-sync quality score in v1; every
 technically valid MP4 is previewable/downloadable for visual user review.
 
 **Rationale**: This directly implements the clarification and avoids presenting model-specific sync
@@ -261,7 +375,7 @@ for frame encoding where compatible.
 macroblock constraints. Explicit mux and verification are required because the pipeline produces
 speech separately. Source: [Diffusers export utilities](https://huggingface.co/docs/diffusers/main/api/utilities).
 
-**Alternatives considered**: Returning the lip-sync adapter's raw file without stream validation can
+**Alternatives considered**: Returning the adapter's raw file without stream validation can
 publish silent or mismatched media. Shell-form FFmpeg commands were rejected for path and injection
 safety.
 
@@ -269,8 +383,8 @@ safety.
 
 **Decision**: Stage a request under fixed project `outputs/.work/<request-id>/`, copy normalized
 original inputs there before inference, and atomically rename the verified directory to
-`outputs/<request-id>/`. On success retain the original image, reference audio, derived voice data,
-synthesized speech, pre-lip video, post-lip video, final MP4, manifest, and sanitized metadata. Clean
+`outputs/<request-id>/`. On success retain the original images, reference audio, derived voice data, the
+assembled prompt, the decoded video and audio, the final MP4, manifest, and sanitized metadata. Clean
 the unpublished staging directory only on failure or cancellation. The bundle root has no UI,
 environment, or request override.
 
@@ -325,8 +439,8 @@ bundle IDs, and a general request cleanup API were rejected as unsafe or incompa
 content transfer, require missing bytes for the full dependency closure plus staging overhead and a
 configurable reserve (10 GiB = `10 * 1024^3` bytes by default). Check the cache and fixed `outputs/`
 destination filesystems separately, aggregating once only when they share a volume. Before inference,
-require the conservative complete-bundle estimate plus reserve; after speech synthesis, refine it from
-exact duration before video inference. Report required, available, reserve, logical/physical cache,
+require the conservative complete-bundle estimate plus reserve; refine it from the effective duration
+once the duration decision is fixed, and monitor free space during every write stage. Report required, available, reserve, logical/physical cache,
 incomplete bytes, and manual cleanup candidates without deleting automatically.
 
 **Rationale**: Complete successful bundles and immutable model revisions intentionally accumulate.
@@ -348,21 +462,28 @@ while a single active heavy request matches the GPU memory constraint. Source:
 [Gradio DownloadButton](https://www.gradio.app/main/docs/gradio/downloadbutton).
 
 **Alternatives considered**: Parallel generations were rejected due to OOM risk. A separate web API,
-database, and worker queue are unnecessary for a local single-user v1.
+database, and worker queue are unnecessary for a local single-user v1. Because a run may last hours, the
+UI additionally reports a monotonic completion fraction during inference and decoding, and the model
+library is read-only for the duration of an active generation.
 
 ## Test and packaging strategy
 
-**Decision**: Keep ordinary tests fully offline with fake Hub/model/worker adapters. Mark real model
-download, MPS, and CUDA tests separately. Install the PyTorch 2.13/CUDA 13.0 wheel before bounded main
-requirements, and create a separately locked LatentSync Windows worker environment using the same
-Blackwell-safe Torch baseline. Refuse production readiness unless both clean environments and their
-versioned worker handshake pass. Keep optional quantization acceleration out of the mandatory path.
+**Decision**: Keep ordinary tests fully offline with fake Hub and model adapters. Mark real model
+download, MPS, and CUDA tests separately. Install the PyTorch 2.13/CUDA 13.0 wheel before the bounded
+application requirements. Run the blocking stack-compatibility spike -- proving the H3 classes load with
+`trust_remote_code=False` -- before any architectural foundation work. Refuse production readiness unless
+the clean environment, the 13.5 GiB peak-reserved accelerator gate, the host system-memory ceiling, and
+the measured duration ceiling on the target card all pass. Make the offline suite profile-agnostic by
+running it a second time against a fixture profile whose duration, frame rate, resolution, language set,
+reference limits, and token capacity all differ from H3's.
 
 **Rationale**: This meets the constitution's test-first and cross-platform requirements while avoiding
-multi-gigabyte downloads in CI and on macOS. The Qwen package currently pins Transformers and
-Accelerate, so the final requirements set must be resolved and tested as one compatible environment.
-Source: [Qwen-TTS package metadata](https://github.com/QwenLM/Qwen3-TTS/blob/main/pyproject.toml).
+multi-gigabyte downloads in CI and on macOS. Collapsing to a single provider removes the previous need for
+two separately locked environments and a versioned worker handshake, so there is now one dependency set to
+resolve and test. The profile-agnostic second run is the concrete regression guard against re-baking one
+model's constants into the architecture, which is exactly what happened with the previous stack.
 
-**Alternatives considered**: Exact transitive hashes are deferred until both OS lock files can be
-generated from tested environments. Conda and container-only deployment were rejected because the
-requested path is standard virtual environments and pip.
+**Alternatives considered**: Exact transitive hashes are deferred until the lock file can be generated
+from a tested environment on each OS. Conda and container-only deployment were rejected because the
+requested path is standard virtual environments and pip. Asserting H3's specific numbers directly in
+shared tests was rejected for the same reason those numbers are kept out of shared code.

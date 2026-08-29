@@ -1,0 +1,19 @@
+line-length = 100
+target-version = "py311"
+
+# Spikes are disposable probes, excluded from the quality gates by design.
+# See spikes/README.md.
+exclude = [".venv", "spikes"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "S", "SIM", "UP", "BLE", "C4", "RET"]
+
+[lint.per-file-ignores]
+# Device and memory probing must degrade to "unavailable", never raise: a missing
+# or broken torch on a dev machine has to leave the app usable.
+"devices.py" = ["BLE001"]
+# Tests assert on private helpers and use bare asserts.
+"tests/**" = ["S101"]
+# The hardcoded "/tmp/evil" values are the attack this file asserts is ignored,
+# not a temp-file mistake.
+"tests/unit/test_config.py" = ["S101", "S108"]

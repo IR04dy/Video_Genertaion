@@ -1,261 +1,393 @@
-# Tasks: Generate Image-Conditioned Video with Audio
+# Tasks: Generate Image-Conditioned Lip-Synced Video
 
 **Input**: Design documents from `specs/001-generate-image-video/`
 
 **Prerequisites**: `plan.md`, `spec.md`, `research.md`, `data-model.md`, `contracts/`, `quickstart.md`
 
-**Tests**: Tests are required by the project constitution. Test tasks precede their corresponding
-implementation tasks, ordinary tests remain offline, and real model/GPU tests are opt-in.
+**Tests**: Required. The project constitution makes test-first NON-NEGOTIABLE, so every test task
+precedes its implementation task. Ordinary tests are offline and download no weights; real
+model/GPU tests are opt-in behind markers.
 
 **Organization**: Tasks are grouped by user story so each story remains independently testable.
 
 ## Format: `[ID] [P?] [Story] Description`
 
-- **[P]**: May run in parallel because it targets different files and has no incomplete dependency.
+- **[P]**: May run in parallel — different files, no incomplete dependency.
 - **[Story]**: Maps the task to a user story from `spec.md`.
 - Every task names the exact file or directory it changes.
 
+## Standing rules for every task
+
+- Model-specific values (duration range, frame rate, resolution, audio sample rate, languages,
+  speaking rates, reference limits, token capacity) live **only** in adapter profiles. A task that
+  puts one in shared code, a shared constant, or a shared assertion is incorrectly implemented.
+- No test may assert an upper bound on wall-clock time. Inference is unbounded by decision.
+- `trust_remote_code` stays false everywhere. No test may enable it to make a load succeed.
+
+---
+
 ## Phase 1: Setup (Shared Infrastructure)
 
-**Purpose**: Create the cross-platform Python project skeleton and dependency/test configuration.
+**Purpose**: Create the cross-platform Python skeleton and dependency/test configuration.
 
-- [ ] T001 Create the planned source, adapter, test, and runtime directories with package markers in `adapters/__init__.py`, `tests/contract/__init__.py`, `tests/integration/__init__.py`, `tests/unit/__init__.py`, and `outputs/.gitkeep`
-- [ ] T002 Define bounded runtime dependencies for Python 3.11, including Diffusers, Gradio, image/audio processing, and platform-neutral PyTorch constraints in `requirements.txt`
-- [ ] T003 [P] Define pytest, coverage, lint, formatting, and type-check dependencies in `requirements-dev.txt`
-- [ ] T004 [P] Configure offline-by-default pytest discovery and `smoke`, `cuda`, and `mps` markers in `pytest.ini`
-- [ ] T005 [P] Add Python caches, virtual environments, Hugging Face caches, `.env`, uploads, generated media, WAV files, and partial mux outputs to `.gitignore`
-- [ ] T006 [P] Document non-secret runtime defaults for bind address, output root, video/audio profiles, retention, queue size, and offline stub mode in `.env.example`
+- [X] T001 Create the planned source, adapter, and test directories with package markers in `adapters/__init__.py`, `tests/__init__.py`, `tests/contract/__init__.py`, `tests/integration/__init__.py`, `tests/unit/__init__.py`, and `outputs/.gitkeep`
+- [X] T002 Declare bounded Python 3.11 runtime dependencies — Diffusers and Transformers releases exporting the H3 classes, Accelerate, a reviewed quantization backend, Hugging Face Hub, Safetensors, Gradio, Pillow, NumPy, SoundFile/librosa, imageio, imageio-ffmpeg, Pydantic 2.x, psutil, filelock — with PyTorch deliberately excluded so the platform wheel is never replaced, in `requirements.txt`
+- [X] T003 [P] Declare pytest, pytest-cov, lint, format, and type-check dependencies in `requirements-dev.txt`
+- [X] T004 [P] Configure offline-by-default discovery and the `stack_compatibility`, `cuda`, `mps`, and `model_download` markers in `pytest.ini`
+- [X] T005 [P] Ignore Python caches, virtual environments, `.model-cache/`, `outputs/` except its placeholder, `.env`, and generated media in `.gitignore`
+- [X] T006 [P] Document non-secret runtime options — bind address, disk reserve, dual resource ceilings, runtime profile, cancellation grace period — with no bundle-root override, in `.env.example`
 
 ---
 
 ## Phase 2: Foundational (Blocking Prerequisites)
 
-**Purpose**: Establish shared domain, configuration, device, error, logging, and test-double contracts.
+**Purpose**: Prove the stack loads, then establish domain, config, device, error, logging, storage, and
+adapter-protocol foundations.
 
-**Critical**: No user-story implementation begins until this phase is complete.
+**Critical**: No user-story work begins until this phase completes.
+
+### Blocking dependency gate
+
+> **Gate outcome (resolved).** The gate found that the `Ref2VA/` subfolder cannot be loaded with
+> `trust_remote_code=False`: its `model_index.json` names classes no upstream release exports, and its
+> `video_vae`/`audio_vae` configs carry `auto_map` entries pointing at bundled `.py` modules. The
+> architecture therefore loads the repository **root** `modular_model_index.json` as a
+> `MiniMaxH3ModularPipeline` with `load_components(workflow="ref2va")`, which uses only upstream classes
+> and ships no Python beside its weights. Every downstream task naming an H3 class must use the root
+> names. See `research.md` → "No remote code required — via the root modular layout".
+
+
+- [X] T007 Write the clean-environment gate asserting every class named by the repository root's `modular_model_index.json` — `MiniMaxH3ModularPipeline`, `MiniMaxH3Blocks`, `MiniMaxH3Transformer3DModel`, `AutoencoderKLMiniMaxH3`, `AutoencoderKLMiniMaxH3Audio`, `MiniMaxH3Scheduler`, `Qwen3VLForConditionalGeneration`, `Qwen3VLProcessor`, `Qwen2TokenizerFast` — imports with `trust_remote_code=False`, and that no root component config declares an `auto_map`, in `tests/integration/test_stack_compatibility.py`
+- [X] T008 Resolve and pin the exact Diffusers/Transformers releases that satisfy T007, recording the resolved versions in `requirements.txt`; if no release exports them, stop and mark the profile `incompatible` rather than enabling remote code — **resolved: `diffusers==0.40.0`, `transformers==5.16.1`, torch floor 2.5**
 
 ### Foundational tests
 
-- [ ] T007 [P] Write failing tests for generation records, seed derivation, state transitions, serialization, and audio metadata in `tests/unit/test_domain.py`
-- [ ] T008 [P] Write failing CUDA→MPS→CPU selection, dtype, capability, and guarded memory-metric tests in `tests/unit/test_devices.py`
-- [ ] T009 [P] Write failing settings and allowlisted video/audio profile validation tests, including gated-license acknowledgement, in `tests/unit/test_config.py`
-- [ ] T010 [P] Write failing domain-error sanitization and stable error-code tests for model, OOM, audio, mux, codec, filesystem, and cancellation failures in `tests/unit/test_errors.py`
+- [X] T009 [P] Write failing tests for typed requests, profiles, plans, bundles, events, and results with serialization round-trips in `tests/unit/test_domain.py`
+- [X] T010 [P] Write failing CUDA→MPS→CPU resolution, dtype, accelerator snapshot, and **host system-memory** measurement tests in `tests/unit/test_devices.py`
+- [X] T011 [P] Write failing tests asserting a profile is rejected when it breaches either the accelerator ceiling or the host RAM ceiling, and that offload mode and quantization are read from the profile rather than discovered, in `tests/unit/test_resource_ceilings.py`
+- [X] T012 [P] Write failing stable-error-code and sanitization tests covering `validation`, `consent`, `face`, `reference`, `language`, `duration`, `oom`, `host_memory`, `disk`, `generation`, `export`, `codec`, `cancelled`, and `internal` in `tests/unit/test_errors.py`
+- [X] T013 [P] Write failing path-containment tests for fixed roots, symlink and Windows reparse-point refusal, UNC/drive/alternate-stream rejection, and server-UUID staging names in `tests/unit/test_paths.py`
+- [X] T014 [P] Write failing settings tests for fixed `outputs/` and `.model-cache/` roots, the configurable 10 GiB reserve, both resource ceilings, and the absence of any bundle-root override in `tests/unit/test_config.py`
 
 ### Foundational implementation
 
-- [ ] T011 Implement typed `ModelProfile`, `AudioProfile`, `GenerationRequest`, `EffectiveGenerationConfig`, `ProgressEvent`, `AudioArtifact`, `GenerationResult`, and metadata serialization in `domain.py`
-- [ ] T012 [P] Implement the stable exception hierarchy, safe user messages, recovery suggestions, and framework-exception mapping helpers in `errors.py`
-- [ ] T013 [P] Implement capability-checked device resolution, device/dtype compatibility, CUDA memory snapshots, peak reset, and safe cache cleanup in `devices.py`
-- [ ] T014 Implement environment loading, `pathlib.Path` normalization, profile allowlists, frame rules, audio limits, output containment, and license acknowledgement in `config.py`
-- [ ] T015 [P] Define injectable video/audio adapter protocols, progress callbacks, cancellation checks, and frame/waveform return contracts in `adapters/base.py`
-- [ ] T016 [P] Configure redacted structured logging that omits tokens, prompts, and full local paths in `logging_config.py`
-- [ ] T017 Create reusable fake video/audio adapters, sample images, waveform fixtures, temporary output roots, and CUDA/MPS capability fakes in `tests/conftest.py`
+- [X] T015 Implement the Pydantic domain records from `data-model.md` — `ModelProfile` with all measured capability fields, `ReferenceSet`, `AssembledPrompt`, `DurationDecision`, `GeneratedOutput`, `ProgressEvent`, `GenerationResult`, `ErrorDetail` — in `domain.py`
+- [X] T016 [P] Implement the stable exception hierarchy, safe user messages, ordered recovery suggestions, and framework-exception mapping in `errors.py`
+- [X] T017 [P] Implement capability-checked device resolution, dtype policy, accelerator allocated/reserved/free snapshots, and host resident-memory sampling in `devices.py`
+- [X] T018 [P] Implement redacted structured logging that omits tokens, prompts, absolute upload paths, and voice data in `logging_config.py`
+- [X] T019 Implement settings loading, `pathlib.Path` normalization, fixed roots, disk reserve, and dual resource ceilings in `config.py`
+- [X] T020 Implement path containment, symlink and reparse-point refusal, atomic manifest writes under a cross-platform lock, and disk estimation in `storage.py`
+- [X] T021 [P] Define the joint audio/video adapter protocol and the capability-profile contract, with progress callbacks and cooperative cancellation checks, in `adapters/base.py`
+- [X] T022 Create reusable fixtures — fake adapters, sample images, waveform fixtures, temporary roots, capability fakes, and a **fixture profile whose measured values all differ from H3's** — in `tests/conftest.py`
 
-**Checkpoint**: Domain contracts and infrastructure pass offline tests; story work can start.
+**Checkpoint**: The stack is proven loadable, foundations pass offline, and story work can start.
 
 ---
 
-## Phase 3: User Story 1 — Generate a Video with Audio (Priority: P1) 🎯 MVP
+## Phase 3: User Story 1 — Generate a Lip-Synced Video (Priority: P1) 🎯 MVP
 
-**Goal**: Upload an image and prompts, generate video plus ambient soundtrack, and preview/download a
-verified MP4 containing synchronized video and non-silent audio.
+**Goal**: Upload images and a reference voice, supply motion and speech text, and receive a verified
+MP4 whose generated speech uses the reference voice with natively synchronized lip movement.
 
-**Independent Test**: Run the stub profile from the Gradio handler with a valid image and prompts;
-verify one playable video stream, one audible AAC audio stream within one frame of video duration,
-effective seeds/parameters in metadata, and identical preview/download paths.
+**Independent Test**: Run the stub profile end to end offline; verify one video stream and one
+non-silent speech stream agreeing within one frame at the profile's frame rate, a complete retained
+bundle, and identical preview/download paths.
 
 ### Tests for User Story 1
 
-- [ ] T018 [P] [US1] Write failing CogVideoX adapter tests for lazy loading, BF16/FP16 policy, model CPU offload, VAE slicing/tiling, seeded calls, and frame extraction in `tests/unit/test_cogvideox_adapter.py`
-- [ ] T019 [P] [US1] Write failing audio tests for derived prompts/seeds, stereo waveform shape, finite samples, normalization, fades, exact duration, and non-silence detection in `tests/unit/test_audio.py`
-- [ ] T020 [P] [US1] Write failing export tests for safe FFmpeg argument construction, silent-video staging, AAC muxing, dual-stream verification, atomic publication, and temporary cleanup in `tests/unit/test_export.py`
-- [ ] T021 [P] [US1] Write the failing successful-generation service contract test with fake video/audio adapters and metadata assertions in `tests/contract/test_generation_service.py`
-- [ ] T022 [P] [US1] Write failing Gradio handler contract tests for image/prompt controls, optional audio prompt, preview path, download path, and final status in `tests/contract/test_ui_contract.py`
-- [ ] T023 [US1] Write the failing offline end-to-end stub test that creates and probes a synchronized MP4 with audible audio in `tests/integration/test_stub_end_to_end.py`
+- [X] T023 [P] [US1] Write failing reference tests for one-or-more images with **no application maximum**, per-image exactly-one-face validation, profile-limit enforcement, single audio anchor, and video-reference rejection in `tests/unit/test_references.py`
+- [X] T024 [P] [US1] Write failing consent tests for per-request attestation defaulting and resetting to false, reset on reference-audio change, and binding to request ID plus audio SHA-256 in `tests/unit/test_consent.py`
+- [X] T025 [P] [US1] Write failing image/audio inspection, EXIF/RGB normalization, decompression-bomb bounds, and retained-path detection tests in `tests/unit/test_media.py`
+- [X] T026 [P] [US1] Write failing prompt tests for dialogue-tag assembly with the selected language, token measurement against profile capacity, motion-prompt truncation recorded as an override, and **speech-script content never truncated, dropped, or reordered** in `tests/unit/test_prompting.py`
+- [X] T027 [P] [US1] Write failing duration tests for suggestion from script length and per-language speaking rate, clamping to the supported range, missing-language fallback, operator override acceptance, out-of-range override refusal, and the **absence of any length-based rejection path** in `tests/unit/test_duration_selection.py`
+- [X] T028 [P] [US1] Write failing validation tests for language membership, seed bounds, guidance against profile bounds, and request preflight ordering in `tests/unit/test_validation.py`
+- [X] T029 [P] [US1] Write failing export tests for safe argument construction, container export, dual-stream verification, non-silence over the spoken region, duration agreement within one frame, atomic publication, and temporary cleanup in `tests/unit/test_export.py`
+- [X] T030 [P] [US1] Write failing bundle tests validating a published manifest against `contracts/request-bundle.schema.json`, including multiple retained `original_image` artifacts and duration provenance fields, in `tests/unit/test_request_bundle.py`
+- [X] T031 [P] [US1] Write the failing generation-service contract test for the successful path, preconditions, and result guarantees with fake adapters in `tests/contract/test_generation_service.py`
+- [X] T032 [P] [US1] Write failing Gradio handler contract tests for multi-image upload, reference-audio upload with the timbre-anchor rule displayed, editable suggested duration, consent reset, preview path, and download path in `tests/contract/test_ui_contract.py`
+- [X] T033 [US1] Write the failing offline end-to-end stub test that publishes a complete bundle and probes the final MP4 in `tests/integration/test_stub_end_to_end.py`
+- [X] T034 [P] [US1] Write the failing profile-agnostic suite that re-runs reference, prompt, duration, and export assertions against the fixture profile from T022 in `tests/unit/test_profile_agnostic.py`
 
 ### Implementation for User Story 1
 
-- [ ] T024 [P] [US1] Implement the deterministic bounded pan/zoom frame generator used for offline workflows in `adapters/stub.py`
-- [ ] T025 [P] [US1] Implement the deterministic stereo tone/noise-envelope soundtrack generator used for offline workflows in `adapters/stub_audio.py`
-- [ ] T026 [US1] Implement audio prompt fallback, deterministic audio-seed derivation, waveform normalization, trim/pad, fades, WAV staging, and non-silence validation in `audio.py`
-- [ ] T027 [US1] Implement silent MP4 export, cross-platform bundled-FFmpeg lookup, safe AAC muxing, dual-stream/duration verification, atomic rename, and intermediate cleanup in `export.py`
-- [ ] T028 [P] [US1] Implement the `zai-org/CogVideoX-5b-I2V` adapter with model-compatible image/frame arguments and CUDA memory controls in `adapters/cogvideox.py`
-- [ ] T029 [P] [US1] Implement the gated `stabilityai/stable-audio-open-small` adapter with configurable replacement model, stereo 44.1 kHz output, seed, duration, and unload support in `adapters/stable_audio.py`
-- [ ] T030 [US1] Implement `VideoGenerationEngine` orchestration for validation, sequential video/audio model residency, stub/real adapter selection, metadata, and terminal results in `pipeline.py`
-- [ ] T031 [US1] Build the Gradio `Blocks` UI with image upload, motion prompt, optional audio prompt, advanced seed/frames/FPS/guidance/model controls, video player, and download button in `app.py`
-- [ ] T032 [US1] Connect the Gradio submit handler to `VideoGenerationEngine`, map results to preview/download outputs, enforce loopback launch defaults, and disable public sharing in `app.py`
+- [X] T035 [P] [US1] Implement image and audio inspection, EXIF/RGB normalization, bounded decode, per-image face and mouth detection, and retained-path detection in `media.py`
+- [X] T036 [US1] Implement `ReferenceSet` staging — copying references into `outputs/.work/<request-id>/inputs/`, digest computation, profile-limit enforcement, video-reference refusal, and consent binding — in `execution.py`
+- [X] T037 [US1] Implement dialogue-tag prompt assembly, token measurement against profile capacity, motion-prompt truncation with recorded override, and retention of the assembled prompt in `prompting.py`
+- [X] T038 [US1] Implement duration suggestion from script length and per-language speaking rate, clamping, missing-language fallback, override handling, and `DurationDecision` construction in `execution.py`
+- [X] T039 [P] [US1] **[implemented in Stage 1, hoisted after T021]** Implement the deterministic offline stub adapter producing fixture frames and a fixture waveform with a declared capability profile in `adapters/stub.py`
+- [ ] T040 [P] [US1] Implement the `minimax-h3` adapter — loading the **repository-root modular pipeline** (`MiniMaxH3ModularPipeline` / `MiniMaxH3Blocks` via `modular_model_index.json`) with `trust_remote_code=False`, declared offload mode and quantization, and a capability profile carrying every measured field — in `adapters/minimax_h3.py`. **Not the `Ref2VA/` subfolder**: T007 proved its VAE configs carry `auto_map` and it names classes no Diffusers release exports, so that path requires remote code and is prohibited
+- [X] T041 [US1] Implement reviewed adapter fingerprints and measured capability-profile resolution in `model_registry.py`
+- [X] T042 [US1] Implement container export, dual-stream verification, non-silence checking over the spoken region, duration agreement within one frame, and atomic publication in `export.py`
+- [X] T043 [US1] Implement bundle publication — staging, manifest writing, artifact inventory, and the atomic rename to `outputs/<request-id>/` — in `storage.py`
+- [X] T044 [US1] Implement `VideoGenerationEngine` orchestration for validation, prompt assembly, duration decision, the single joint generation, decode, export, verify, and publish in `pipeline.py`
+- [X] T045 [US1] Build the Gradio Blocks UI with multi-image upload, reference-audio upload displaying the timbre-anchor and different-words rule, motion prompt, speech script, language selector, editable suggested duration, consent checkbox, advanced controls, video player, and download button in `app.py`
+- [X] T046 [US1] Wire the submit handler to `VideoGenerationEngine`, map results to preview and download outputs, reset consent after every submit and on audio change, and enforce loopback binding with sharing disabled in `app.py`
 
-**Checkpoint**: The P1 workflow creates a synchronized MP4 with audio using stubs offline and exposes
-the real video/audio profiles behind explicit model-access configuration.
+**Checkpoint**: The P1 workflow produces a verified MP4 offline with stubs and exposes the real H3
+profile behind explicit model configuration.
 
 ---
 
-## Phase 4: User Story 2 — Understand Progress and Resource Use (Priority: P2)
+## Phase 4: User Story 2 — Select and View Models (Priority: P2)
 
-**Goal**: Show ordered loading, preprocessing, video inference, audio generation, mux, export, and
-terminal status with device-appropriate memory information.
+**Goal**: Supply Hugging Face URLs, download compatible models with visible status, and select, update,
+or delete inventory entries.
 
-**Independent Test**: Drive the engine with event-emitting fakes and verify monotonic phase/progress
-updates plus CUDA memory metrics or an explicit unavailable state on MPS/CPU.
+**Independent Test**: With a fake Hub, inspect and download a model, restart, confirm it stays ready
+and selectable offline, then preview and confirm its deletion with measured reclaimed bytes.
 
 ### Tests for User Story 2
 
-- [ ] T033 [P] [US2] Write failing ordered, monotonic, request-scoped progress-event contract tests covering video, audio, mux, and terminal phases in `tests/contract/test_generation_service.py`
-- [ ] T034 [P] [US2] Write failing UI progress/status and CUDA-versus-unavailable memory rendering tests in `tests/contract/test_ui_contract.py`
+- [ ] T047 [P] [US2] Write failing URL tests for canonical HTTPS `huggingface.co` roots, the commit-pinned versus `tracking_ref` `oneOf` in `contracts/model-source.schema.json`, and rejection of credentials, queries, fragments, blob paths, and alternate hosts in `tests/unit/test_model_urls.py`
+- [ ] T048 [P] [US2] Write failing registry tests asserting inspection matches adapter fingerprints, records every measured profile field, and marks a profile `incompatible` when any field is missing or unmeasured in `tests/unit/test_model_registry.py`
+- [ ] T049 [P] [US2] Write failing tests asserting **no license field is ever requested, parsed, persisted, or displayed**, even when fake Hub metadata contains one, in `tests/unit/test_model_license_exclusion.py`
+- [ ] T050 [P] [US2] Write failing dependency-closure tests for pinned auxiliary snapshots, digests, and refusal of hidden downloads during inference in `tests/unit/test_model_dependencies.py`
+- [ ] T051 [P] [US2] Write failing inventory tests for atomic replacement, restart reconciliation, lease protection, and deletion eligibility in `tests/unit/test_inventory.py`
+- [ ] T052 [P] [US2] Write failing manual-update tests asserting `refresh()` never contacts the network, `check_for_update()` runs only on explicit action, and a downloaded update becomes a separate revision in `tests/unit/test_model_updates.py`
+- [ ] T053 [P] [US2] Write failing disk-preflight tests for pre-transfer estimation, the configurable reserve, and reporting required/available/reserve without mutation in `tests/unit/test_disk_preflight.py`
+- [ ] T054 [P] [US2] Write the failing model-catalog-service contract test covering inspect, download, retry, update, delete, discard-partial, and **refusal of downloads while a generation is active** in `tests/contract/test_model_catalog_service.py`
+- [ ] T055 [P] [US2] Write the failing offline restart test proving a ready revision stays selectable with no network in `tests/integration/test_inventory_restart.py`
+- [ ] T056 [P] [US2] Write the opt-in real-download test behind the `model_download` marker in `tests/integration/test_model_download.py`
 
 ### Implementation for User Story 2
 
-- [ ] T035 [US2] Emit sanitized phase events, inference-step fractions, per-stage timing, and terminal progress from `VideoGenerationEngine` in `pipeline.py`
-- [ ] T036 [P] [US2] Add request-scoped CUDA allocated/reserved/peak sampling and sequential-stage memory logging in `devices.py`
-- [ ] T037 [US2] Render `gr.Progress`, phase status, elapsed time, effective device/profile, and memory summaries without prompts or full paths in `app.py`
+- [ ] T057 [US2] Implement URL normalization, `validate_repo_id()` rules, tracking-ref versus commit resolution, and the pinned `https://huggingface.co` endpoint in `model_catalog.py`
+- [ ] T058 [US2] Implement metadata inspection with `trust_remote_code=False`, remote-kernel disablement, adapter fingerprint matching, dependency-closure resolution, and dual-ceiling compatibility in `model_catalog.py`
+- [ ] T059 [US2] Implement immutable snapshot download into `.model-cache/`, progress events, resume, digest and required-file verification, and ready-state transition in `model_catalog.py`
+- [ ] T060 [US2] Implement atomic inventory persistence, startup reconciliation, stale-state recovery, and lease acquisition and release in `model_catalog.py`
+- [ ] T061 [US2] Implement `check_for_update()` and `download_update()` as explicit user actions producing separate revisions in `model_catalog.py`
+- [ ] T062 [US2] Implement deletion preview with a short-lived confirmation token, eligibility rechecks under lock, shared-blob-preserving revision deletion, and measured reclaimed bytes in `model_catalog.py`
+- [ ] T063 [US2] Implement refusal of downloads and update downloads while a generation is active, keeping listing, inspection, and update checks available, in `model_catalog.py`
+- [ ] T064 [US2] Build the Model Library UI — URL entry, role selection, inspection summary with measured profile fields and no license data, download progress, inventory table, update check, and confirmed deletion — in `app.py`
 
-**Checkpoint**: Long-running generation is visibly progressing through both ML stages and muxing,
-with accurate device-aware diagnostics.
+**Checkpoint**: Models can be acquired, inspected, updated, and removed entirely offline after download.
 
 ---
 
-## Phase 5: User Story 3 — Recover from Unsupported or Exhausted Environments (Priority: P3)
+## Phase 5: User Story 3 — Understand Progress and Resource Use (Priority: P3)
 
-**Goal**: Launch safely on macOS/CPU and return actionable, cleaned-up failures for invalid input,
-unsupported backends, OOM, model/license access, audio generation, muxing, and cancellation.
+**Goal**: Show ordered phase progress with a completion fraction during the long stages, plus
+accelerator and host memory information.
 
-**Independent Test**: Inject each documented failure into the offline engine and verify one safe
-terminal result, no published MP4, no leaked temporary media, and corrective UI guidance.
+**Independent Test**: Drive the engine with event-emitting fakes and verify ordered phases, monotonic
+fractions during `generating` and `decoding`, and both memory readings, with no latency assertion.
 
 ### Tests for User Story 3
 
-- [ ] T038 [P] [US3] Write failing prompt/audio-prompt, seed, frame/FPS/guidance, image orientation/mode/size, path-containment, and model-profile validation tests in `tests/unit/test_validation.py`
-- [ ] T039 [P] [US3] Write failing OOM, model/auth/license, unsupported MPS operation, audio-generation, mux/codec, filesystem, and unexpected-error translation tests in `tests/unit/test_errors.py`
-- [ ] T040 [P] [US3] Write failing cancellation, concurrency-limit, partial-output cleanup, and cached-model release contract tests in `tests/contract/test_generation_service.py`
-- [ ] T041 [P] [US3] Write failing UI tests ensuring failures clear video/download outputs and display ordered recovery suggestions in `tests/contract/test_ui_contract.py`
+- [ ] T065 [P] [US3] Write failing progress-contract tests for the ordered phase set, request-scoped events, monotonic fractions within a stage, and exactly one terminal event in `tests/contract/test_generation_service.py`
+- [ ] T066 [P] [US3] Write failing UI tests for phase status rendering, completion fraction display, and accelerator-versus-unavailable plus host memory summaries in `tests/contract/test_ui_contract.py`
+- [ ] T067 [US3] Write the failing long-runtime test proving fractions keep arriving during a slow fake generation and that **no assertion bounds elapsed time**, in `tests/integration/test_long_runtime.py`
 
 ### Implementation for User Story 3
 
-- [ ] T042 [US3] Implement image preprocessing, decompression-bomb limits, request/profile preflight, duration limits, output containment, and license/access validation in `pipeline.py`
-- [ ] T043 [US3] Implement stage-aware exception translation, OOM recovery, failed-artifact cleanup, and safe terminal metadata in `pipeline.py`
-- [ ] T044 [US3] Implement cooperative cancellation and a process-wide single-generation lock compatible with Gradio queueing in `pipeline.py`
-- [ ] T045 [US3] Configure a bounded Gradio queue with concurrency one, cancellation wiring, cleared failure outputs, and actionable recovery messages in `app.py`
-- [ ] T046 [P] [US3] Add opt-in real-backend smoke tests for MPS compatibility and CUDA video/audio model loading without affecting the offline suite in `tests/integration/test_mps_smoke.py` and `tests/integration/test_cuda_smoke.py`
+- [X] T068 [US3] Emit sanitized ordered phase events with per-stage timing and a monotonic completion fraction during generation and decoding from `pipeline.py`
+- [X] T069 [P] [US3] Add request-scoped accelerator allocated/reserved/peak and host resident-memory sampling per stage in `devices.py`
+- [ ] T070 [US3] Render progress, phase status, elapsed time, effective device and profile, and both memory summaries without prompts or absolute paths in `app.py`
 
-**Checkpoint**: All specified failure modes terminate safely and the app remains testable without
-CUDA or model downloads.
+**Checkpoint**: A multi-hour run is visibly progressing and never looks stalled.
 
 ---
 
-## Phase 6: Polish & Cross-Cutting Concerns
+## Phase 6: User Story 4 — Recover from Unsupported or Exhausted Environments (Priority: P4)
 
-**Purpose**: Complete deployment documentation, security/license review, and cross-platform release
-validation after the desired user stories are finished.
+**Goal**: Launch safely on macOS and CPU, and return actionable cleaned-up failures for every
+documented error class.
 
-- [ ] T047 [P] Write architecture, configuration, model-license/access, artifact-retention, and local-security documentation in `README.md`
-- [ ] T048 [P] Update executable macOS and Windows setup, CUDA verification, audio-model access, launch, test, and OOM/mux troubleshooting instructions in `specs/001-generate-image-video/quickstart.md`
-- [ ] T049 [P] Add explicit Hub token, gated-model license acknowledgement, remote-code prohibition, loopback binding, and media-retention checks in `tests/unit/test_config.py`
-- [ ] T050 Run and fix formatting, linting, type checking, offline tests, and coverage gates configured by `requirements-dev.txt` across `app.py`, `pipeline.py`, supporting modules, `adapters/`, and `tests/`
-- [ ] T051 Run the RTX 5080 CUDA acceptance benchmark for 720x480, 49 frames, 8 FPS, sequential audio generation, dual-stream MP4, synchronization, and <15.5 GiB peak memory in `tests/integration/test_cuda_smoke.py`
-- [ ] T052 Validate every command and expected output in `specs/001-generate-image-video/quickstart.md` on a clean macOS environment and record the Windows validation checklist in `README.md`
+**Independent Test**: Inject each documented failure offline and verify one safe terminal result, no
+published bundle, no leaked staging directory, and ordered recovery guidance.
+
+### Tests for User Story 4
+
+- [ ] T071 [P] [US4] Write failing translation tests for OOM, host-memory breach, model access, unsupported backend, generation, export, codec, and filesystem failures in `tests/unit/test_errors.py`
+- [ ] T072 [P] [US4] Write failing cancellation tests asserting checks at bounded intervals inside long stages, released leases, removed staging, and one terminal cancelled result — with no elapsed-time assertion — in `tests/contract/test_generation_service.py`
+- [ ] T073 [P] [US4] Write failing mid-write disk tests asserting the reserve is monitored during writes, the run stops with the storage error, staging is removed, and published bundles are untouched in `tests/unit/test_disk_preflight.py`
+- [ ] T074 [P] [US4] Write failing UI tests ensuring failures clear video and download outputs and show ordered recovery suggestions in `tests/contract/test_ui_contract.py`
+- [ ] T075 [P] [US4] Add the opt-in MPS and CUDA smoke tests in `tests/integration/test_mps_smoke.py` and `tests/integration/test_cuda_smoke.py`
+
+### Implementation for User Story 4
+
+- [ ] T076 [US4] Implement stage-aware exception translation, OOM and host-memory recovery guidance, failed-artifact cleanup, and safe terminal metadata in `pipeline.py`
+- [ ] T077 [US4] Implement cooperative cancellation checked at bounded intervals in every long stage, with resource release and bounded staging cleanup, in `pipeline.py`
+- [ ] T078 [US4] Implement periodic free-space monitoring during every write stage, stopping with the storage error while leaving published bundles untouched, in `storage.py`
+- [ ] T079 [US4] Implement the process-wide single-generation lock and bounded Gradio queue with cancellation wiring in `pipeline.py` and `app.py`
+- [ ] T080 [US4] Implement startup orphan-staging recovery using owner and lock markers before bounded cleanup in `storage.py`
+
+**Checkpoint**: Every documented failure terminates safely and the app remains testable without CUDA.
+
+---
+
+## Phase 7: Read-Only Request History
+
+**Goal**: Expose retained bundles read-only, with advisory voice-reuse dependencies.
+
+**Independent Test**: Publish bundles offline, refresh history, verify preview, artifact inventory,
+size, dependency links, and that no mutation control exists.
+
+- [ ] T081 [P] Write failing history-service contract tests for the fixed scan root, absence of any mutation operation, and safe projections in `tests/contract/test_request_history_service.py`
+- [ ] T082 [P] Write failing scanner tests for manifest validation, UUID directory filtering, `.work` exclusion, and containment checks in `tests/unit/test_request_history.py`
+- [ ] T083 Write the failing reconciliation test for externally deleted and corrupt origins that never repairs or cascades in `tests/integration/test_history_reconciliation.py`
+- [ ] T084 Implement the read-only scanner, manifest validation, advisory dependency graph, and safe projections in `request_history.py`
+- [ ] T085 Implement the filesystem voice-reuse boundary — digest matching, origin recording, and a required fresh consent attestation — in `execution.py`
+- [ ] T086 Build the read-only History panel with preview, artifact rows, dependency summary, disk summary, and warnings, wired to no mutation control, in `app.py`
+
+---
+
+## Phase 8: Polish & Cross-Cutting Concerns
+
+- [ ] T087 [P] Write architecture, configuration, retention, and local-security documentation in `README.md`
+- [ ] T088 [P] Validate every command and expected output in `specs/001-generate-image-video/quickstart.md` on a clean macOS environment
+- [ ] T089 [P] Add explicit Hub-token, remote-code-prohibition, loopback-binding, and plaintext-disclosure checks in `tests/unit/test_config.py`
+- [ ] T090 Run and fix formatting, linting, type checking, the offline suite, and coverage gates across all modules, `adapters/`, and `tests/`
+- [ ] T091 **[hoisted to Stage 0 — blocked: needs the Windows RTX 5080 host]** Measure the **real supported duration ceiling** for the H3 profile on the RTX 5080 and record it as a profile field rather than assuming the card's stated 15 s, in `adapters/minimax_h3.py`. Source the value from `MiniMaxH3ModularPipeline.max_duration` and confirm it against an actual generation; run `spikes/h3_feasibility.py` first
+- [ ] T092 **[hoisted to Stage 0 — blocked: needs the Windows RTX 5080 host]** Measure resident host footprint per precision against 64 GB and peak allocator-reserved memory against 13.5 GiB, recording both in the profile, in `tests/integration/test_cuda_smoke.py`. The `ref2va` working set is 134.12 GiB at BF16, so establish which quantization is actually resident before T040 declares one; run `spikes/h3_feasibility.py --stage load` first
+- [ ] T093 Run the Windows RTX 5080 acceptance — clean install, one joint `ref2va`-workflow generation, zero hidden downloads during inference, dual-ceiling compliance, complete retained artifacts, and audio/video duration agreement — in `tests/integration/test_cuda_smoke.py`
+- [ ] T094 Record measured wall-clock baselines in `README.md` **without introducing any SLA or latency gate**
 
 ---
 
 ## Dependencies & Execution Order
 
-### Phase Dependencies
+### Phase dependencies
 
-- **Setup (Phase 1)**: Starts immediately.
-- **Foundational (Phase 2)**: Depends on Setup and blocks every user story.
-- **US1 (Phase 3)**: Depends on Foundational; delivers the complete audio/video MVP.
-- **US2 (Phase 4)**: Depends on Foundational and the P1 engine/UI extension points; its test design
-  can begin in parallel with late P1 implementation.
-- **US3 (Phase 5)**: Depends on Foundational and the P1 engine lifecycle; failure-test design can
-  begin in parallel with late P1 implementation.
-- **Polish (Phase 6)**: Depends on all user stories selected for release.
+- **Setup (Phase 1)**: starts immediately.
+- **Foundational (Phase 2)**: depends on Setup. **T007–T008 gate everything** — if the H3 classes do
+  not load with `trust_remote_code=False`, stop and resolve dependencies before any further work.
+- **US1 (Phase 3)**: depends on Foundational. Delivers the MVP.
+- **US2 (Phase 4)**: depends on Foundational. Independent of US1 except for shared domain records.
+- **US3 (Phase 5)**: depends on the US1 engine extension points.
+- **US4 (Phase 6)**: depends on the US1 engine lifecycle.
+- **History (Phase 7)**: depends on US1 bundle publication.
+- **Polish (Phase 8)**: depends on all selected stories.
 
-### User Story Dependency Graph
+### User story graph
 
 ```text
-Setup -> Foundation -> US1 (audio/video MVP) -> Polish
-                         |-> US2 (progress/metrics) -|
-                         |-> US3 (recovery/safety) --|
+Setup → Foundational(gate) → US1 (MVP) → History → Polish
+                           ├→ US2 (catalog) ─────────┤
+                           ├→ US3 (progress) ────────┤
+                           └→ US4 (recovery) ────────┘
 ```
 
-- **US1** is independently testable with stub video/audio adapters and is the required MVP.
-- **US2** adds observable progress without changing US1 generation outputs.
-- **US3** adds failure recovery without changing the successful US1 contract.
-- After the P1 engine contract exists, US2 and US3 can proceed in parallel.
+### Within each story
 
-### Within Each User Story
-
-- Write the story's tests and verify they fail for the intended missing behavior.
-- Implement adapters/domain behavior before orchestration that consumes them.
+- Write the story's tests and confirm they fail for the intended reason.
+- Implement adapters and domain behavior before the orchestration that consumes them.
 - Implement engine behavior before UI integration.
-- Publish a final MP4 only after video, audio, mux, and verification all succeed.
-- Run the independent story test at the phase checkpoint before proceeding.
+- Publish a bundle only after generation, decode, export, and verification all succeed.
 
-## Parallel Opportunities
+## Parallel opportunities
 
-- T003–T006 are independent setup-file tasks.
-- T007–T010 are independent failing-test tasks; T012, T013, T015, and T016 target separate modules.
-- T018–T022 can be written in parallel; T024, T025, T028, and T029 implement separate adapters.
-- T033 and T034 can run in parallel; T036 is independent of the engine/UI implementations.
-- T038–T041 can run in parallel; T046 is isolated behind opt-in markers.
-- T047–T049 can run in parallel before the integrated quality/acceptance passes.
+- T003–T006 are independent setup files.
+- T009–T014 are independent failing-test files; T016, T017, T018, and T021 target separate modules.
+- T023–T032 and T034 can be written in parallel; T035, T039, and T040 implement separate modules.
+- T047–T056 are independent; T065–T067 and T071–T075 likewise.
+- T087–T089 can run in parallel before the integrated quality and acceptance passes.
 
-## Parallel Examples
+## Implementation strategy
 
-### User Story 1
+### MVP first
 
-```text
-T018: tests/unit/test_cogvideox_adapter.py
-T019: tests/unit/test_audio.py
-T020: tests/unit/test_export.py
-T021: tests/contract/test_generation_service.py
-T022: tests/contract/test_ui_contract.py
+1. Complete Setup and Foundational, treating T007–T008 as a hard gate.
+2. Complete US1 tests, then stubs, references, prompting, duration, export, engine, and UI.
+3. Validate the offline stub bundle independently.
+4. Integrate the real H3 Ref2VA profile behind explicit model configuration.
 
-After tests fail as expected:
-T024: adapters/stub.py
-T025: adapters/stub_audio.py
-T028: adapters/cogvideox.py
-T029: adapters/stable_audio.py
-```
+### Incremental delivery
 
-### User Story 2
+1. **Foundation**: typed, testable, cross-platform control plane with a proven dependency stack.
+2. **US1**: complete images + voice + prompts → verified MP4 workflow.
+3. **US2**: model acquisition, inventory, updates, and deletion.
+4. **US3**: progress and dual memory visibility for long runs.
+5. **US4**: failure recovery, cancellation, and cross-platform safety.
+6. **History**: read-only retained-bundle browsing and voice reuse.
+7. **Polish**: measured hardware baselines and release validation.
 
-```text
-T033: tests/contract/test_generation_service.py
-T034: tests/contract/test_ui_contract.py
-T036: devices.py
-```
+## Completion criteria
 
-### User Story 3
-
-```text
-T038: tests/unit/test_validation.py
-T039: tests/unit/test_errors.py
-T040: tests/contract/test_generation_service.py
-T041: tests/contract/test_ui_contract.py
-T046: tests/integration/test_mps_smoke.py and tests/integration/test_cuda_smoke.py
-```
-
-## Implementation Strategy
-
-### MVP First
-
-1. Complete Setup and Foundational phases.
-2. Complete US1 tests, offline stubs, audio normalization/mux, engine, and UI.
-3. Stop and validate the synchronized audio/video MP4 independently.
-4. Integrate real CogVideoX and Stable Audio profiles behind explicit access configuration.
-
-### Incremental Delivery
-
-1. **Foundation**: Typed, testable, cross-platform control plane.
-2. **US1**: Complete image + prompt → video + generated audio → downloadable MP4 workflow.
-3. **US2**: Detailed progress and memory visibility.
-4. **US3**: Cross-platform fallback and production-grade failure recovery.
-5. **Polish**: License/security review, clean-environment verification, and RTX 5080 acceptance.
-
-## Completion Criteria
-
-- All 52 tasks retain checkbox, sequential task ID, required story label, and exact file path.
-- The P1 independent test proves both video and audible synchronized audio are present.
+- All 94 tasks retain a checkbox, sequential ID, required story label, and exact file path.
+- The P1 independent test proves a verified MP4 with non-silent synchronized speech.
 - Offline tests require neither network access nor accelerator hardware.
-- CUDA/MPS/model tests run only through explicit pytest markers.
-- No temporary silent video or WAV is published as a successful result.
+- The profile-agnostic suite passes against a fixture profile with entirely different values.
+- No test asserts an upper bound on elapsed time.
+- CUDA, MPS, model-download, and stack-compatibility tests run only through explicit markers.
+
+
+
+---------------
+
+
+
+
+
+The numbered order above is correct on *dependencies* but wrong on *risk*. It follows the spec-kit convention — setup → foundation → stories by priority → polish — which puts every hardware measurement (T091, T092, T093) in Phase 8. That schedules the one question that can invalidate the whole project **last**.
+
+Here's the order I'd actually work in.
+
+## Stage 0 — Prove it runs at all (before any product code)
+
+```
+T001, T003, T004, T005  →  T007 → T008  →  [SPIKE]  →  T091, T092
+```
+
+T002 stays a stub here; T008 is what fills in the real pins.
+
+The spike is **not in tasks.md and should not be product code** — a throwaway script that `hf download`s the Ref2VA checkpoint, loads it under sequential/layer-wise offload plus quantization, and generates one clip at the minimum duration. It answers three things:
+
+1. Does a 33B omni-model produce a frame at all on 16 GB VRAM?
+2. Peak reserved bytes vs. the 13.5 GiB gate; peak host RSS vs. 64 GB.
+3. Wall-clock for the shortest possible run — the number that tells you whether "unbounded" means 20 minutes or 9 hours.
+
+You don't need US2 for this. Nothing in US1 touches `model_catalog.py` (I checked — the catalog appears only in T054, T057–T064), so hand-placing the snapshot in `.model-cache/` is entirely sufficient for months.
+
+**This also fixes a real circular dependency in the current file.** T040 must declare "every measured field," but T091 — which produces the measurements — runs 51 tasks later and edits the same file. As written, T040 necessarily writes placeholder numbers that T091 comes back and corrects. Measuring first collapses that into one honest write.
+
+## Stage 1 — Foundation
+
+```
+T002 (finalize)  →  T009–T014  →  T015–T021  →  T039  →  T022
+```
+
+One change: **hoist T039 (stub adapter) out of US1 to sit right after T021.** It's the reference implementation of the protocol you just defined, and it's what makes every downstream test runnable. Leaving it at T039 means writing twelve test files against a protocol nothing implements yet.
+
+## Stage 2 — MVP on stubs
+
+```
+T023–T034  →  T035–T038  →  T041–T044  →  T068, T069  →  T045, T046
+```
+
+**Hoist T068 + T069 (progress emission) out of US3 into US1**, before the UI lands. They're rated P3 as a *user-facing* feature, but for a run measured in hours they're your only way to distinguish a slow generation from a hung one — you'll need them while debugging Stage 3, not after. Leave T070 (the rendered panel) at P3 where it belongs.
+
+## Stage 3 — MVP on real H3
+
+```
+T040  →  T093
+```
+
+T040 now declares numbers you measured in Stage 0 instead of numbers you hoped for.
+
+## Stage 4 — Robustness before catalog
+
+```
+T071–T080   (US4)
+T047–T064   (US2)
+```
+
+**This inverts the spec's P2/P4 priority, deliberately.** After Stage 3 you have a real multi-hour run on a card with 16 GB. OOM is the most probable failure mode in this entire project, and T076 (OOM translation and recovery guidance) plus T077 (cancellation) are what make it survivable. The model catalog is 18 tasks of convenience over a command you can run by hand.
+
+Keep the spec order instead if the Model Library is a demo requirement rather than a workflow one — that's the only reason to.
+
+## Stage 5 — Finish
+
+```
+T065–T067, T070  (US3 UI)  →  T081–T086 (History)  →  T087–T090, T094
+```
+
+## On the `[P]` markers
+
+51 tasks are marked parallel, but that's addressed to multiple developers or agents. Solo, treat `[P]` as "these can be written in one sitting without switching context" — batch T009–T014 and T023–T032 as single writing sessions rather than trying to interleave them.
+
+---
+
+The single highest-value change is Stage 0. Everything else is refinement; that one moves project-viability discovery from ~task 90 to ~task 10.
+
+Want me to restructure tasks.md to this sequence — either renumbering, or adding a "Recommended execution order" section that leaves the IDs stable?

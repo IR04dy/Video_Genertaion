@@ -8,15 +8,15 @@ paths when persisted.
 
 | Name | Values |
 |------|--------|
-| `ModelRole` | `video`, `voice`, `lip_sync` |
+| `ModelRole` | `video`, `voice`, `lip_sync` — a single profile may declare all three natively |
 | `ProviderMode` | `native`, `dedicated` |
 | `ModelState` | `inspecting`, `downloading`, `verifying`, `ready`, `incompatible`, `failed`, `deleting` |
 | `DownloadState` | `queued`, `inspecting`, `downloading`, `verifying`, `ready`, `failed`, `cancelled` |
 | `RequestState` | `queued`, `validating`, `planning`, `running`, `exporting`, `complete`, `failed`, `cancelled` |
-| `StageKind` | `voice`, `duration_plan`, `video`, `video_resample`, `lip_sync`, `native_composite`, `mux`, `verify`, `metadata`, `publish` |
+| `StageKind` | `validate`, `prepare_references`, `assemble_prompt`, `plan_duration`, `load_model`, `generate`, `decode`, `export`, `verify`, `metadata`, `publish` |
 | `DeviceKind` | `cuda`, `mps`, `cpu` |
 | `BundleAvailability` | `available`, `missing`, `corrupt`, `unsafe` |
-| `ArtifactKind` | `original_image`, `reference_audio`, `derived_voice`, `speech`, `video_pre_lip`, `video_post_lip`, `final_mp4`, `metadata` |
+| `ArtifactKind` | `original_image`, `reference_audio`, `derived_voice`, `assembled_prompt`, `decoded_video`, `decoded_audio`, `final_mp4`, `metadata` |
 
 ## ModelSource
 
@@ -47,18 +47,31 @@ Validated capability manifest produced by an installed reviewed adapter.
 | `pipeline_class` | string | Reviewed class/interface, never arbitrary repository code |
 | `supported_devices` | set[`DeviceKind`] | At least one runtime |
 | `dtype_policy` | mapping | Preferred and allowed dtype per device |
-| `memory_profiles` | list | Offload, VAE, quantization, expected peak, minimum VRAM |
-| `video_constraints` | record/null | Dimensions, frame predicate/range/default, FPS, guidance |
-| `speech_constraints` | record/null | Languages and reference-audio constraints |
-| `input_contract` | record | Required artifacts and optional reference transcript |
-| `output_contract` | record | Produced video/audio/alignment artifacts |
+| `memory_profiles` | list | Offload mode, quantization, expected accelerator peak, expected host resident bytes |
+| `duration_range_seconds` | record | Measured min/max/default supported output duration |
+| `frame_rate` | positive number | Measured output frame rate |
+| `resolutions` | list[record] | Measured supported output dimensions |
+| `audio_output` | record | Measured sample rate and channel layout |
+| `dialogue_languages` | non-empty list[string] | Measured stable language set |
+| `speaking_rates` | mapping language -> positive number | Measured characters (or syllables) per second used to suggest a duration; a language may be absent |
+| `reference_limits` | record | Accepted reference kinds with max counts and per-clip duration bounds; rejected kinds with reasons |
+| `prompt_capacity_tokens` | integer | Measured prompt/token capacity |
+| `dialogue_tag_form` | string | Documented tag syntax used to carry script content and language |
+| `input_contract` | record | Required references and optional reference transcript |
+| `output_contract` | record | Produced video/audio artifacts and whether they are generated jointly |
 | `weight_policy` | record | Allowed extensions, required files, hashes/exceptions |
 | `auxiliary_sources` | list[`ModelDependency`] | Complete pinned VAE/tokenizer/Whisper/etc. closure |
-| `worker_profile` | record/null | Versioned local worker/runtime/timebase contract when isolated |
+| `resource_profile` | record | Declared offload mode, quantization, accelerator ceiling, and host system-memory ceiling |
 
-`native_capabilities` must be a subset of `roles`, and a profile claiming native voice or lip sync
-must also claim `video`. License identifiers, terms, URLs, acknowledgement state, and compatibility
-judgments are intentionally absent from this model.
+`native_capabilities` must be a subset of `roles`, and a profile claiming native voice or lip sync must
+also claim `video`. License identifiers, terms, URLs, acknowledgement state, and compatibility judgments
+are intentionally absent from this model.
+
+**Every field in this table is a measured value belonging to one adapter.** No duration, frame rate,
+resolution, sample rate, language list, reference limit, or token capacity may appear as an
+application-level constant, a shared default, or a shared test assertion. The offline suite runs a second
+time against a fixture profile whose values all differ, which fails if any of them have leaked into
+architecture-level code.
 
 ## ModelDependency and RequiredFile
 
@@ -200,9 +213,9 @@ Validated UI input for exactly one generation.
 | Field | Type | Validation / meaning |
 |-------|------|----------------------|
 | `request_id` | UUID | Server-generated collision-safe identity |
-| `image_path` | Path | Required local still image from upload workspace or validated retained bundle; copied into staging |
-| `motion_prompt` | string | Trimmed, 1-2,000 characters |
-| `speech_script` | string | Trimmed, 1-2,000 characters |
+| `image_paths` | non-empty list[Path] | One or more local still images from upload workspace or validated retained bundle; copied into staging. No application maximum; bounded by profile reference limits |
+| `motion_prompt` | string | Trimmed, non-empty, no maximum length; truncated to the video adapter's text-encoder capacity with a recorded override |
+| `speech_script` | string | Trimmed, non-empty, no maximum length; synthesized in full with provider segmentation when required |
 | `reference_audio_path` | Path | Required upload or validated retained-bundle file; copied into staging before inference |
 | `reference_transcript` | string/null | Used only when effective voice profile allows/requires it |
 | `language` | string | Explicit member of effective voice profile language list |
@@ -226,23 +239,6 @@ Validated UI input for exactly one generation.
 The UI checkbox defaults to false, resets after each submission, and resets whenever reference audio
 changes. No bundle/history record can hydrate consent for a later request.
 
-## VoiceReference
-
-Request-scoped interpretation of uploaded reference audio.
-
-| Field | Type | Meaning |
-|-------|------|---------|
-| `request_id` | UUID | Owning request |
-| `source_path` | Path | Validated upload path or retained-bundle file selected by the user |
-| `staged_path` | Path | Request-owned copy under `outputs/.work/<request-id>/inputs/` |
-| `format`, `sample_rate`, `channels`, `duration_seconds` | scalar | Measured media properties |
-| `speaker_result` | record | Provider-specific single-speaker/quality result |
-| `transcript` | string/null | Optional model-specific reference text |
-| `consent` | `ConsentAttestation` | Bound to staged audio digest and current request |
-| `origin` | `VoiceOrigin`/null | Advisory origin when source resolves beneath an earlier valid bundle |
-| `derived_artifact_path` | Path/null | Plaintext request-owned voice representation after synthesis |
-| `lifecycle` | enum | `staged`, `retained`, `discarded_with_failed_stage` |
-
 ## RuntimeProfile
 
 | Field | Type | Meaning |
@@ -250,83 +246,135 @@ Request-scoped interpretation of uploaded reference audio.
 | `name` | string | Stable selected profile |
 | `device` | `DeviceKind` | Capability-checked effective device |
 | `dtype` | string | Effective precision for current stage |
-| `offload`, `vae_slicing`, `vae_tiling` | boolean | Memory flags |
-| `quantization` | string/null | Reviewed optional mode |
-| `memory_limit_bytes` | integer/null | Acceptance ceiling |
+| `offload_mode` | enum | `none`, `model_cpu`, `sequential_cpu`, `layer_wise`; declared, not discovered |
+| `quantization` | string/null | Reviewed checkpoint/component mode; expected for the production profile |
+| `max_reserved_bytes` | integer/null | Accelerator ceiling; production CUDA default is 13.5 GiB |
+| `max_host_resident_bytes` | integer/null | **Host system-memory ceiling**, measured against installed RAM |
+| `minimum_free_headroom_bytes` | integer/null | Required device free-memory margin around the heavy stage |
 | `warnings` | list[string] | Safe limitations shown to user |
 
-`WorkerProfile` records protocol version, interpreter identifier, dependency fingerprint, adapter/code
-commit, PyTorch/CUDA versions, device capability, dtype, media timebase, allowed cache/staging roots,
-and handshake status. The production LatentSync profile is local-only FP16 at 25 FPS/16 kHz; any
-fingerprint mismatch fails before model load.
+Both ceilings gate readiness. A profile satisfying `max_reserved_bytes` but breaching
+`max_host_resident_bytes` is not selectable, and vice versa. Because layer-wise offload keeps the resident
+model in host memory and streams it to the device, host RAM is a first-class budget rather than an
+incidental one, and the required offload mode and quantization are recorded in the profile rather than
+discovered at run time.
 
 ## ExecutionBlueprint, EffectiveExecutionPlan, and ExecutionStage
 
 `ExecutionBlueprint` is compiled before any model inference. It fixes request ID, effective seed,
-resolved providers/commits, provider choices, staging handle, runtime/worker profiles, static validation,
-and the mandatory prefix `voice -> speech_verify -> duration_plan`, but it does not claim final temporal
-values. After speech synthesis, `DurationPlan` finalizes the immutable `EffectiveExecutionPlan`.
+resolved providers/commits, provider choices, staging handle, runtime profile, static validation,
+and static validation, but it does not claim a final duration. `DurationDecision` and `AssembledPrompt`
+finalize the immutable `EffectiveExecutionPlan` before any model allocation.
 
 | Field | Type | Meaning |
 |-------|------|---------|
 | `request_id` | UUID | Owning request |
 | `effective_seed` | integer | Recorded seed |
 | `resolved_models` | mapping | Role -> model ID, repo ID, commit, adapter |
-| `provider_choices` | mapping | Effective Native/Dedicated decisions |
-| `duration_plan` | `DurationPlan`/null | Null in blueprint; required in effective plan |
+| `provider_choices` | mapping | Effective Native/Dedicated decisions where a role overlaps |
+| `duration_decision` | `DurationDecision`/null | Null in blueprint; required in effective plan |
+| `assembled_prompt` | `AssembledPrompt`/null | Null in blueprint; required in effective plan |
 | `stages` | ordered list[`ExecutionStage`] | Blueprint prefix or finalized topological stages |
 | `staging_dir` | Path | Fixed `outputs/.work/<request-id>` beneath the project root |
 | `published_dir` | Path | Fixed `outputs/<request-id>` target; absent from history until atomic publication |
 
 Each `ExecutionStage` stores `stage_id`, `kind`, `provider_model_id` or null, input/output artifact
-names, runtime/worker profile, timebase, and unload-after-stage flag. The effective order is always
-voice, speech verification, duration planning, video, optional duration-preserving resample, and lip
-sync. A native composite may combine only the final video/lip stages after an accepted duration plan.
-No two heavy model stages or worker processes overlap.
+names, runtime profile, and unload-after-stage flag. The effective order is always validate, prepare
+references, assemble prompt, plan duration, load model, generate, decode, export, verify, metadata, and
+publish. Exactly one `generate` stage runs per request and it produces video and audio jointly, so no two
+heavy model stages exist to overlap.
 
-## DurationPlan
+## DurationDecision
 
-Immutable temporal decision created from the verified speech artifact before video allocation.
+Immutable temporal decision recorded before any model allocation. There is no looping, repetition, or
+padding: one generation produces the whole output, so this record selects and justifies the duration
+handed to the adapter.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `speech_duration_seconds` | positive number | Authoritative decoded speech duration |
-| `preferred_num_frames`, `preferred_fps` | scalar | User preferences retained for reporting |
-| `effective_num_frames`, `effective_fps` | scalar | Adapter-supported combination selected by planner |
-| `video_duration_seconds` | positive number | Duration implied by the effective combination |
-| `lip_sync_fps`, `final_num_frames` | scalar/null | Declared bridge/final timebase when required |
-| `tolerance_seconds` | positive number | Exactly one effective video frame |
-| `overrides` | list[string] | Safe explanations for changed preferences |
-| `adapter_constraint_id` | string | Versioned reviewed temporal rule used |
-| `candidate_rank` | record | Deterministic delta/preference/profile-order tie-break evidence |
+| `suggested_duration_seconds` | positive number | Derived from trimmed script length and the profile's per-language speaking rate, clamped to the supported range |
+| `speaking_rate_used` | record/null | Language and rate field the suggestion came from; null when the language has no entry |
+| `requested_duration_seconds` | number/null | Operator override; null means the suggestion was accepted |
+| `operator_overrode` | boolean | Whether the operator changed the suggested value |
+| `effective_duration_seconds` | positive number | Value used, within the profile's supported range |
+| `effective_num_frames` | integer | `effective_duration_seconds * profile.frame_rate` |
+| `frame_rate` | positive number | From the profile, not a constant |
+| `resolution` | record | Width/height from the profile's supported set |
+| `audio_sample_rate` | integer | From the profile |
+| `overrides` | list[string] | Safe explanations for any changed preference |
+| `profile_id` | string | Adapter profile identity and revision the decision was made against |
 
-The plan is valid only when the full speech fits without trimming or time-stretching and the absolute
-audio/video duration difference is no greater than `tolerance_seconds`. No valid combination is a
-terminal `duration` error before video inference. Candidate duration is
-`generated_frames / playback_fps`; selection sorts by duration delta, requested-frame distance,
-requested-FPS distance, then stable profile order. The fixed CogVideoX profile contributes only
-`(49, 8)`. The LatentSync bridge derives a 25-FPS final frame count while preserving clip duration and
-uses `1 / 25` second as the final mux tolerance.
+Every numeric field above is derived from the effective `ModelProfile`, never from an application-level
+constant. Because audio and video are generated jointly, duration is an **input** to generation and
+cannot be measured from synthesized speech beforehand. There is therefore no pre-generation script-fit
+check and no rejection for script length: the suggestion is advisory, the operator may override it
+anywhere in the supported range, and rushed or clipped delivery is corrected by raising the duration and
+regenerating.
 
-## Media Artifacts
+## ReferenceSet
 
-### VideoArtifact
+One or more image references plus exactly one audio reference. Video references are rejected.
 
-Request ID, path, frame count, FPS, width/height, codec/container status, duration, source stage, and
-artifact kind (`video_pre_lip`, `video_post_lip`, or `final_mp4`), digest, byte size, and
-staged/retained/discarded lifecycle state. Every successful variant is retained.
+| Field | Type | Validation / meaning |
+|-------|------|----------------------|
+| `request_id` | UUID | Owning request |
+| `image_paths` | non-empty list[Path] | Staged still images anchoring subject identity and appearance, all of the same subject |
+| `audio_path` | Path | Staged recording anchoring voice timbre only |
+| `audio_role` | const `timbre_anchor` | Never played back, never mixed into output, never treated as content |
+| `source_paths` | mapping staged -> Path | Validated upload path or retained-bundle file each staged copy came from |
+| `measured` | record | Format, dimensions, duration, sample rate, channels, digests per reference |
+| `speaker_result` | record | Provider-specific single-speaker/quality result for the audio reference |
+| `transcript` | string/null | Optional model-specific reference text when the profile allows one |
+| `consent` | `ConsentAttestation` | Bound to the staged audio digest and the current request |
+| `origin` | `VoiceOrigin`/null | Advisory origin when the audio source resolves beneath an earlier valid bundle |
+| `derived_artifact_path` | Path/null | Plaintext request-owned voice representation produced during generation |
+| `profile_limits` | record | Accepted kinds, max counts, per-clip duration bounds from the profile |
+| `rejected_kinds` | list[string] | Kinds refused with reason; video is always refused on token cost |
+| `lifecycle` | enum | `staged`, `retained`, `discarded_with_failed_stage` |
 
-### SpeechArtifact
+The application imposes **no maximum** on `image_paths`; the only bound is the profile's measured
+reference limit, and exceeding it is a `reference` error. Every image must independently contain exactly
+one usable face and mouth region. Subject consistency across images is the operator's responsibility.
 
-Request ID, path/waveform metadata, script hash, language, voice model/revision, sample rate, channels,
-duration, finite/non-silence checks, normalization result, source stage, digest, byte size, and
-staged/retained/discarded lifecycle state. The verified duration is authoritative for `DurationPlan`.
+The UI states that the recording should say **different words** from the speech script. A recording whose
+path resolves beneath a valid bundle adds an advisory `VoiceOrigin`.
 
-### LipSyncAlignment
+## AssembledPrompt
 
-Request ID, provider/revision, face/mouth target, technical processing state, output video artifact,
-user-review state (`pending`, `reviewed`), and technical failure detail. It contains no automated
-quality acceptance score in v1.
+The text actually submitted to the adapter, retained in every successful bundle.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `motion_text` | string | Motion description after any truncation |
+| `dialogue_segments` | list[record] | Script content with the selected language, in the profile's dialogue-tag form |
+| `rendered` | string | Final assembled prompt string submitted to the adapter |
+| `token_count` | integer | Measured against the profile's capacity; may exceed it |
+| `token_capacity` | integer | From the profile |
+| `over_capacity` | boolean | Derived: whether `token_count` exceeds `token_capacity` |
+| `motion_truncation` | record/null | `original_length`, `retained_length`, `discarded_length` |
+| `structuring_version` | string | Version of the locally built prompt structuring |
+
+Only `motion_text` may be truncated, and never silently. Dialogue segments are never truncated, dropped,
+or reordered.
+
+An over-capacity prompt is **recorded, never refused**. Motion gives way first, all of it if necessary;
+if the script alone still exceeds capacity, `over_capacity` is set, the script is carried in full, and
+the adapter decides. Refusing here would terminate a request because of its script length, which the
+duration invariants forbid.
+
+## GeneratedOutput
+
+The single joint audio/video result of one generation. There is no separate speech artifact and no
+lip-sync alignment record, because one adapter invocation produces mouth movement and voice together.
+
+Request ID, decoded video path, decoded audio path, final MP4 path, frame count, frame rate,
+width/height, audio sample rate and channel layout, container/stream summary, measured video and audio
+duration, script hash, language, adapter profile and revision, a non-silence check over the spoken
+region, digests, byte sizes, and staged/retained/discarded lifecycle state.
+
+There is no pre-lip or post-lip variant, no intermediate timebase, no separate mux input, and no
+automated lip-sync quality score. Synchronization is judged visually by the operator, per the
+publication policy; the application records no review state because it exposes no review workflow.
 
 ## ArtifactRecord
 
@@ -368,7 +416,7 @@ Versioned immutable manifest written in staging and atomically published with a 
 | `consent` | record | `confirmed: true` and fresh server timestamp for this request |
 | `language` | string | Effective explicitly selected speech language |
 | `models` | mapping | Effective provider IDs, repositories, immutable commits, adapters |
-| `parameters` | record | Requested preferences, effective seed, duration plan, runtime values |
+| `parameters` | record | Requested preferences, effective seed, duration decision, assembled-prompt token counts and truncation override, runtime values |
 | `memory_by_stage` | mapping | CUDA metrics or explicit unavailable records |
 | `plaintext_sensitive_artifacts` | literal `true` | Disclosure invariant for reference/derived voice files |
 | `disk_bytes` | non-negative integer | Sum of listed retained artifacts at publication (manifest excluded) |
@@ -409,8 +457,9 @@ availability, and safe global warnings. It is an in-memory projection and is nev
 | `memory` | `MemorySnapshot`/null | Device metrics |
 | `timestamp` | UTC datetime | Event ordering |
 
-`MemorySnapshot` contains availability, device name, allocated/reserved/peak bytes when CUDA is
-active, and an unavailable reason otherwise.
+`MemorySnapshot` contains availability, device name, current/peak allocated bytes, current/peak
+allocator-reserved bytes, driver-reported free/total bytes when CUDA is active, gate result, and an
+unavailable reason otherwise. Production acceptance gates peak reserved, not peak allocated.
 
 ## GenerationResult
 
@@ -432,7 +481,7 @@ active, and an unavailable reason otherwise.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `code` | enum | `validation`, `consent`, `face`, `language`, `model_url`, `model_access`, `model_download`, `model_incompatible`, `inventory`, `model_load`, `unsupported_backend`, `oom`, `disk`, `speech`, `duration`, `lip_sync`, `mux`, `codec`, `history`, `cancelled`, `filesystem`, `internal` |
+| `code` | enum | `validation`, `consent`, `face`, `reference`, `language`, `duration`, `model_url`, `model_access`, `model_download`, `model_incompatible`, `inventory`, `model_load`, `unsupported_backend`, `oom`, `host_memory`, `disk`, `generation`, `export`, `codec`, `history`, `cancelled`, `filesystem`, `internal` |
 | `message` | string | Actionable and sanitized |
 | `retryable` | boolean | Whether a changed/repeated action may succeed |
 | `suggestions` | list[string] | Ordered recovery actions |
@@ -480,8 +529,25 @@ application state transition to deleted; external filesystem removal is observed
 
 - A generation has exactly one terminal state and never publishes a partial output.
 - `video_path` is visible only after container, stream, non-silence, and duration verification.
-- Voice synthesis and speech verification precede duration planning; an accepted duration plan precedes
-  every video allocation. Speech is never trimmed, stretched, or partially omitted.
+- An accepted `DurationDecision` and `AssembledPrompt` precede every model allocation. The model is
+  invoked exactly once per request and produces video and audio jointly. Speech is never trimmed,
+  time-stretched, truncated, or partially omitted, and no request terminates because of script length.
+  The `duration` error is reserved for an operator override falling outside the profile's supported
+  range.
+- No output is looped, repeated, reversed, padded, resampled across timebases, or concatenated. Mouth
+  movement comes from the same invocation as the audio, so no separate lip-sync or face-validation stage
+  exists.
+- One or more image references and exactly one audio timbre anchor are accepted, bounded only by the
+  profile's measured reference limits. Video references are rejected. The reference recording is never
+  played back, mixed into the output, or treated as content.
+- Duration is an input to generation, never a measurement. No request is rejected for script length.
+- Every profile is validated against both the accelerator-memory and host system-memory ceilings before
+  becoming selectable. Inference time is unbounded and carries no estimate or confirmation gate.
+- Every model-specific value -- duration range, frame rate, resolution, audio sample rate, languages,
+  reference limits, token capacity -- lives in the adapter profile. A value of this kind appearing in
+  shared code, a shared constant, or a shared test assertion is an invariant violation.
+- A truncated motion prompt is always recorded as an explicit override with original, retained, and
+  discarded lengths; silent truncation is an invariant violation.
 - Every successful request records true consent, explicit language, immutable model commits, effective
   provider choices, seed, parameters, device/dtype, and per-stage memory.
 - Every successful bundle contains all required `ArtifactKind` values and remains untouched by cleanup,

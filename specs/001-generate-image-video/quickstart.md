@@ -5,24 +5,43 @@ creates the application and bounded requirement files.
 
 ## macOS development and offline workflow
 
+For the offline suite, the control plane is all you need — no torch, no model
+stack, no accelerator:
+
 ```bash
-python3 --version
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install torch torchvision torchaudio
-python -m pip install -r requirements.txt
 python -m pip install -r requirements-dev.txt
+python -m pytest
 ```
 
-Run the deterministic providers first. They exercise model/history UI, input staging, fresh consent,
-speech-first planning, duration decisions, worker messaging, full bundle publication, MP4 verification,
-preview/download, and failure cleanup without CUDA, network access, or model weights.
+`requirements-dev.txt` includes `requirements-core.txt`, so this installs on any
+platform and runs every offline test. Add the model stack only when you need to
+load real weights:
 
 ```bash
-I2V_RUNTIME_PROFILE=stub python app.py
-python -m pytest -m "not mps and not cuda and not model_download"
+python -m pip install torch torchvision torchaudio
+python -m pip install -r requirements.txt
 ```
+
+On an Intel Mac the second step installs but cannot load a model: PyTorch ships
+no x86_64 macOS wheel above 2.2.2, and the pinned libraries need 2.5. The offline
+suite is unaffected because it never imports Diffusers.
+
+Run the deterministic stub profile first. It exercises model/history UI, input staging, fresh consent,
+two-reference validation, dialogue-tag prompt assembly, duration decisions, full bundle publication, MP4
+verification, preview/download, and failure cleanup without CUDA, network access, or model weights.
+
+```bash
+python app.py          # stub profile is the default until a model is downloaded
+python -m pytest       # offline: pytest.ini deselects every opt-in marker
+```
+
+Do not pass `-m` to get the offline run. A command-line `-m` *replaces* the
+expression in `pytest.ini` rather than narrowing it, so
+`-m "not mps and not cuda and not model_download"` silently re-enables the
+network-dependent stack gate. The bare `python -m pytest` is the offline suite.
 
 Open `http://127.0.0.1:7860`. Public sharing remains disabled. An Apple Silicon backend smoke is opt-in:
 
@@ -30,8 +49,8 @@ Open `http://127.0.0.1:7860`. Public sharing remains disabled. An Apple Silicon 
 python -m pytest -m mps
 ```
 
-Only adapters declaring MPS support may run. Production CogVideoX/Qwen/LatentSync is not expected on
-macOS; unsupported profiles fail before allocation and never import/execute CUDA-only worker code.
+Only adapters declaring MPS support may run. The production MiniMax-H3 profile is not expected on macOS;
+unsupported profiles fail before allocation and never import or execute CUDA-only code.
 
 ## Windows 11 RTX 5080 production setup
 
@@ -46,32 +65,50 @@ python -m pip install -r requirements.txt
 python -m pip install -r requirements-dev.txt
 ```
 
-The main lock includes `qwen-tts==0.1.1`, `transformers==4.57.3`, and `accelerate==1.12.0`.
-Create the separately locked LatentSync worker because its provider stack conflicts with the main one:
+**The torch line must come first.** Diffusers and Transformers both depend on
+torch, so installing `requirements.txt` into an environment without it pulls a
+generic CPU wheel — and the application then runs on the CPU with nothing
+obviously wrong in the install log. `python -m pytest -m stack_compatibility`
+catches it: below torch 2.5 the gate skips and says so.
+
+There is a **single environment**. Collapsing to one joint audio/video provider removed the previous
+second virtual environment and its separately locked worker stack, because there is no longer a second
+heavyweight provider with conflicting dependency pins.
+
+H3 is loaded from the repository **root** (`modular_model_index.json`) as a `MiniMaxH3ModularPipeline`,
+selecting the `ref2va` workflow — **not** from the `Ref2VA/` subfolder, whose VAE configs declare
+`auto_map` remote code. The lock must supply `diffusers==0.40.0` and `transformers==5.16.1` (or later
+releases exporting the same classes). Verify before anything else, because the profile stays
+`incompatible` rather than falling back to remote repository code:
 
 ```powershell
-deactivate
-py -3.11 -m venv .venv-latentsync
-.\.venv-latentsync\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install torch==2.13.0 torchvision==0.28.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu130
-python -m pip install -r requirements-latentsync-windows.txt
-deactivate
-.\.venv\Scripts\Activate.ps1
-$env:I2V_LATENTSYNC_PYTHON = (Resolve-Path '.\.venv-latentsync\Scripts\python.exe').Path
+python -m pytest -m stack_compatibility
 ```
 
-Verify Blackwell support before model-file transfer:
+That gate is authoritative. For a quick manual check:
+
+```powershell
+python -c "from diffusers import MiniMaxH3ModularPipeline, MiniMaxH3Blocks, MiniMaxH3Transformer3DModel, AutoencoderKLMiniMaxH3, AutoencoderKLMiniMaxH3Audio, MiniMaxH3Scheduler; from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor, Qwen2TokenizerFast; print('H3 classes available')"
+```
+
+The gate needs **torch >= 2.5**; Transformers 5.x disables its model classes below that. PyTorch ships no
+x86_64 macOS wheel above 2.2.2, so this check cannot run on an Intel Mac at all — the offline suite still
+can, because it never imports Diffusers.
+
+Verify Blackwell support and host memory before model-file transfer:
 
 ```powershell
 python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO CUDA'); print(torch.cuda.get_device_capability(0) if torch.cuda.is_available() else 'NO CAPABILITY'); print(torch.cuda.get_arch_list() if torch.cuda.is_available() else [])"
 ```
 
+Acceptance also records installed and available host system memory; the target machine has 64 GB, and
+layer-wise offload makes host RAM a gating resource alongside the 16 GB of VRAM.
+
 Acceptance requires PyTorch 2.13.x, CUDA 13.0, RTX 5080, capability `(12, 0)`, compiled `sm_120`
 support where exposed, and successful BF16/FP16 allocations. Then launch:
 
 ```powershell
-$env:I2V_RUNTIME_PROFILE = 'production'
+$env:APP_RUNTIME_PROFILE = 'production'
 python app.py
 ```
 
@@ -82,69 +119,90 @@ as an authentication/access error.
 
 ## Download and select the reference model set
 
-Submit canonical repository URLs in Model Library:
+In the Model Library section, submit the default reviewed profile's repository URL:
 
 ```text
-Video:    https://huggingface.co/zai-org/CogVideoX-5b-I2V
-Voice:    https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base
-Lip sync: https://huggingface.co/ByteDance/LatentSync-1.5
+Video + native voice + native lip sync:  https://huggingface.co/MiniMaxAI/MiniMax-H3
 ```
 
-The app shows normalized repository ID, tracking ref when provided, resolved immutable commit,
-adapter/roles, access state, dependency closure, expected transfer bytes, disk preflight, device/memory
-compatibility, and provider constraints. It never shows or stores license fields.
+One model covers all three roles. There is no separate speech model and no separate lip-sync model to
+download. Only the **Ref2VA** checkpoint is used, because it is the mode that accepts an image reference
+plus an audio reference.
 
-Before model-file content transfer, the complete missing dependency closure plus staging overhead must
-leave the configured reserve (10 GiB by default). Ready entries include verified required-file digests
-and remain selectable offline; inference loads only local commit-pinned snapshots.
+Before download the app shows the resolved immutable commit, detected adapter and roles, expected size,
+and compatibility against **both** the accelerator-memory and host system-memory ceilings, along with the
+measured profile fields it will enforce: supported duration range, frame rate, resolutions, audio output,
+dialogue languages, accepted reference kinds and limits, and prompt token capacity. It shows no license
+information; that responsibility is entirely yours, outside this application.
 
 After download:
 
-1. Confirm all entries and auxiliary dependencies show `ready` with immutable commits.
-2. Select CogVideoX as video, Qwen3-TTS as Dedicated voice, and LatentSync as Dedicated lip sync.
-3. If native and dedicated providers overlap, explicitly choose Native or Dedicated for each role.
-4. Review Qwen's ten-language allowlist and reference-audio rules. `Auto` language is disabled.
-5. Note that transcript-free x-vector cloning is used by the reference profile and may be less faithful
-   than Qwen's ICL mode with a matching reference transcript.
+1. Confirm the entry shows `ready` with its immutable commit.
+2. Select it as the video profile. Voice and lip-sync roles resolve to it natively, so no dedicated
+   provider selection is required.
+3. Review the displayed reference rules and dialogue-language list before uploading anything.
 
-`Check for updates` is manual and uses an entry's stored tracking ref. A different commit downloads as
-a separate entry; the old revision is never replaced, selected, or deleted automatically. A commit-only
-entry has no update check until a tracking ref is established.
-
-Model deletion requires confirmation, rejects active/leased/dependency-referenced revisions, preserves
-shared blobs, and reports only measured reclaimed bytes after re-scan. App-owned incomplete downloads
-have a separate confirmed discard action; no broad cache prune runs automatically.
+Ready models remain selectable offline. **While a generation is running the model library is read-only:**
+downloads and update downloads are refused until the run finishes or you cancel it. Listing, inspection,
+and update checks stay available. To remove a model, ensure no generation uses it, choose Delete, review
+expected reclaimed space, and confirm.
 
 ## Generate a video
 
-Provide one still image containing exactly one clear face/mouth, a motion prompt, a speech script, one
-provider-compatible reference recording, an explicit supported language, and current confirmation that
-you own the voice or have permission to clone it. Consent defaults/resets false, resets when the audio
-changes, and is bound server-side to the new request ID and audio SHA-256.
+Provide:
 
-The reference CogVideoX adapter is fixed at 720x480, 49 generated frames, 8 FPS, guidance 6, and an
-English motion prompt. Frame/FPS controls are preferences for adapters that declare alternatives; they
-do not make this fixed profile variable-duration. Speech is synthesized first. If its full duration
-cannot fit the single CogVideoX candidate within the final one-frame tolerance, generation stops before
-the video model and asks for a shorter/longer script near the supported duration or another adapter.
-Speech is never trimmed or time-stretched.
+- **one or more still images** of the same subject, each containing exactly one clear face and mouth
+  region. More views generally anchor identity better. There is no app-imposed limit — only the profile's;
+- **one reference recording** as a *voice timbre anchor*;
+- a **motion prompt** describing the scene and movement;
+- a **speech script** — what the subject actually says;
+- an explicit **language** from the profile's supported list;
+- current confirmation that you own the voice or have permission to clone it.
 
-The successful order is:
+**The reference recording must say different words from the speech script.** It is never played back and
+never mixed into the output — it conditions voice timbre only. Spoken content comes exclusively from the
+script, which the app embeds in the prompt as `<d>[language]...</d>` dialogue tags. The UI states this
+rule at the point of upload.
+
+**Video files are not accepted as references.** A 15-second reference clip costs roughly 86,000 tokens on
+its own, which breaks the memory ceiling before generation starts. Image and audio only.
+
+Consent still applies in full. It defaults and resets to false, resets whenever the reference audio
+changes, and is bound server-side to the request ID and the audio's SHA-256. This is still voice cloning;
+only the model performing it has changed.
+
+The app then runs **one** generation that produces video and stereo audio together. There is no separate
+speech step, no lip-sync pass, and no timebase conversion — mouth movement and voice come out of the same
+invocation.
 
 ```text
-validate and stage inputs
--> synthesize and verify complete speech
--> derive duration plan and recheck disk
--> generate 49-frame/8-FPS video
--> resample video to 25 FPS without changing duration
--> run isolated LatentSync 1.5 worker
--> mux and verify audio/video
+validate inputs, references, language, consent
+-> assemble prompt with dialogue tags and measure tokens
+-> suggest a duration from script length and speaking rate; operator may override
+-> recheck disk
+-> ONE joint audio/video generation
+-> decode video and audio
+-> export container and verify streams
 -> write manifest and atomically publish the full bundle
 ```
 
-The result reports requested/effective values, 8-FPS source and 25-FPS final timebases, seed, immutable
-models/providers, stage memory, and retained bytes. A technically valid MP4 appears in the player and
-download control without an automated lip-sync quality gate; review synchronization visually.
+Duration is an **input** to the generation, not something measured from the speech — audio and video come
+out together, so there is no separate speech stage to measure first. The app suggests a duration from your
+script length and the profile's per-language speaking rate, clamped to the supported range, and you can
+override it. Nothing is rejected for script length. If the delivery sounds rushed, raise the duration and
+regenerate.
+
+A motion prompt longer than the profile's token capacity is truncated to fit, and the truncation is
+reported as an explicit override. The speech script is never truncated.
+
+**Expect a long run.** On a single 16 GB card the model runs under layer-wise CPU offload from a
+quantized checkpoint, trading time for capacity. There is no time limit, no runtime estimate, and no
+confirmation prompt — a run measured in hours is the expected operating point, not a fault. Progress
+shows a completion fraction during inference and decoding so you can tell it is working, and cancelling
+takes effect within seconds.
+
+Local output is **768p short side**. 2K requires H3-Regenerate-2K, which is not part of the open-source
+release and would require a hosted API call this application does not make.
 
 ## Successful retention and Request History
 
@@ -152,9 +210,10 @@ Before the first submission, the UI states that reference audio and derived voic
 unencrypted files. Every successful request is published only under fixed project
 `outputs/<request-id>/` and retains:
 
-- copied original image and reference audio;
-- derived voice representation and synthesized speech;
-- pre-lip, post-lip, and final MP4 media;
+- copied original images and reference audio;
+- derived voice representation;
+- the assembled prompt actually submitted;
+- decoded video, decoded audio, and the final MP4;
 - request/effective metadata and the validated manifest.
 
 There is no output-root setting or environment override, no in-app bundle deletion, and no automatic
@@ -175,31 +234,45 @@ reconcile orphan staging after lock/owner checks; it never cleans a published bu
 
 ```text
 python -m pytest -m "not mps and not cuda and not model_download"
+python -m pytest -m stack_compatibility
 python -m pytest -m model_download
 python -m pytest -m cuda
 ```
 
-The offline suite downloads no weights and uses a fake worker. Model-download tests verify fixed Hub
+The offline suite downloads no weights and uses a stub adapter. It also runs a second time against a
+fixture profile whose duration, frame rate, resolution, language set, reference limits, and token
+capacity all differ from H3's — that pass fails if any model-specific value has leaked into shared code. Model-download tests verify fixed Hub
 endpoint, no remote code/license handling, immutable dependencies, disk reserve, offline restart,
 manual update coexistence, deletion races, and partial-download handling. Windows CUDA acceptance
-verifies the full Qwen -> duration -> CogVideoX -> 25-FPS bridge -> isolated LatentSync path, zero hidden
-downloads during inference, each heavy peak below 15.5 GiB, complete retained artifacts, and final
-audio/video duration within one 25-FPS frame.
+The blocking stack spike verifies that the H3 classes load with `trust_remote_code=False` and measures
+resident footprint per precision against both ceilings; failure leaves the profile `incompatible` before
+architecture is frozen. Windows CUDA acceptance verifies one joint `ref2va`-workflow generation end to end, measures
+the real supported duration ceiling on this card rather than assuming 15 s, zero hidden downloads
+during inference, peak at or below 13.5 GiB allocator-reserved accelerator memory on the display-attached
+target, host resident memory at or below the configured ceiling, complete retained artifacts, and final
+audio and video duration agreeing within one frame at the profile's frame rate. A long-runtime run proves
+that progress keeps reporting a completion fraction and that cancellation takes effect within the
+documented interval; it asserts nothing about elapsed time.
 
-Record measured target-machine latency; do not invent an SLA.
+Record measured target-machine wall-clock time as a baseline only. **Do not invent an SLA, and never fail
+a run for taking too long** — unbounded inference time is the accepted trade for running a 20B-effective
+model on a single 16 GB card.
 
 ## Recovery order
 
-1. Confirm driver, PyTorch/CUDA/capability, and worker handshake versions.
-2. Confirm no other process materially consumes GPU memory.
-3. Retry after the application releases the failed provider/worker.
-4. Enable a stronger reviewed offload/quantized profile that passed the same adapter tests.
-5. Select another adapter whose documented temporal/memory profile supports the complete speech.
-6. Free model/bundle space manually when the reserve preflight fails.
-7. Never silently change model, provider, seed, speech, or effective media values.
+1. Confirm driver, PyTorch/CUDA/capability versions, and that the pinned Diffusers and Transformers
+   releases actually export the H3 classes.
+2. Confirm no other process materially consumes GPU or system memory.
+3. Retry after the application releases the failed provider.
+4. Select a profile variant with stronger offload or heavier quantization that passed the same adapter
+   tests; both the accelerator and host ceilings must still hold.
+5. Shorten the speech script when a request is refused for duration, or choose a shorter supported
+   duration.
+6. Free model/bundle space manually when a disk reserve check fails, at preflight or mid-write.
+7. Never silently change model, profile, seed, speech, or effective media values.
 
-LatentSync 1.6 is not enabled because its documented minimum inference VRAM is 18 GB. Lowering the
-fixed CogVideoX frame count is not a valid recovery action for this profile.
+A slow run is not a fault condition. Do not treat elapsed time as a failure signal; there is no timeout
+to recover from.
 
 ## Runtime files and privacy
 

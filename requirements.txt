@@ -1,0 +1,48 @@
+# Runtime dependencies (Python 3.11).
+#
+# ORDER MATTERS. Install the platform PyTorch wheel FIRST, then this file.
+#
+# PyTorch is deliberately absent from this list so a resolver never replaces the
+# CUDA build with a generic one. But diffusers and transformers both depend on
+# torch, so installing this file into an environment with NO torch will silently
+# pull a CPU wheel — and on Windows that means the whole application runs on the
+# CPU, or fails the stack gate, with nothing obviously wrong in the install log.
+#
+#   1. pip install torch --index-url https://download.pytorch.org/whl/cu130
+#   2. pip install -r requirements.txt
+#   3. python -m pytest -m stack_compatibility     # confirms the floor was met
+#
+# Required floor, enforced by the installed libraries rather than by this file:
+#   torch >= 2.5   (transformers 5.x refuses to enable PyTorch below this;
+#                   diffusers 0.40 references torch.xpu, absent before 2.4)
+#
+# Versions below were resolved by T008 against tests/integration/test_stack_compatibility.py.
+# Every MiniMax-H3 component class named by the repository's modular_model_index.json
+# is exported by these releases, so the checkpoint loads with trust_remote_code=False.
+
+-r requirements-core.txt
+
+# --- Model stack (pinned by the T008 dependency gate) ---
+diffusers==0.40.0          # MiniMaxH3ModularPipeline, MiniMaxH3Blocks,
+                           # MiniMaxH3Transformer3DModel, MiniMaxH3Scheduler,
+                           # AutoencoderKLMiniMaxH3, AutoencoderKLMiniMaxH3Audio
+transformers==5.16.1       # Qwen3VLForConditionalGeneration, Qwen3VLProcessor,
+                           # Qwen2TokenizerFast
+accelerate>=1.0            # layer-wise / sequential CPU offload
+# Reviewed quantization backend. CUDA hosts only: it publishes no wheel for
+# Intel macOS, and without the marker this file is unsatisfiable there — which
+# would make the control-path dev environment impossible to create.
+bitsandbytes>=0.45; sys_platform == "linux" or sys_platform == "win32"
+
+# --- Model acquisition and storage ---
+huggingface-hub>=0.26
+safetensors>=0.4.5
+
+# --- Media ---
+numpy>=1.26,<2.3
+soundfile>=0.12
+librosa>=0.10
+imageio>=2.35
+
+# --- Application ---
+gradio>=4.44

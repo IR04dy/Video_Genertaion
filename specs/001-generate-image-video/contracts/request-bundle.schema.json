@@ -37,12 +37,12 @@
       "uniqueItems": true,
       "items": {"$ref": "#/$defs/artifact"},
       "allOf": [
-        {"contains": {"properties": {"kind": {"const": "original_image"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"kind": {"const": "original_image"}}, "required": ["kind"]}, "minContains": 1},
         {"contains": {"properties": {"kind": {"const": "reference_audio"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
         {"contains": {"properties": {"kind": {"const": "derived_voice"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
-        {"contains": {"properties": {"kind": {"const": "speech"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
-        {"contains": {"properties": {"kind": {"const": "video_pre_lip"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
-        {"contains": {"properties": {"kind": {"const": "video_post_lip"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"kind": {"const": "assembled_prompt"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"kind": {"const": "decoded_video"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"kind": {"const": "decoded_audio"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
         {"contains": {"properties": {"kind": {"const": "final_mp4"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1},
         {"contains": {"properties": {"kind": {"const": "metadata"}}, "required": ["kind"]}, "minContains": 1, "maxContains": 1}
       ]
@@ -95,9 +95,9 @@
             "original_image",
             "reference_audio",
             "derived_voice",
-            "speech",
-            "video_pre_lip",
-            "video_post_lip",
+            "assembled_prompt",
+            "decoded_video",
+            "decoded_audio",
             "final_mp4",
             "metadata"
           ]
@@ -108,7 +108,7 @@
         "sha256": {"$ref": "#/$defs/sha256"},
         "created_by_stage": {
           "type": "string",
-          "enum": ["voice", "duration_plan", "video", "video_resample", "lip_sync", "native_composite", "mux", "verify", "metadata", "publish"]
+          "enum": ["validate", "prepare_references", "assemble_prompt", "plan_duration", "load_model", "generate", "decode", "export", "verify", "metadata", "publish"]
         }
       }
     },
@@ -150,28 +150,64 @@
       "additionalProperties": false,
       "required": [
         "effective_seed",
-        "preferred_num_frames",
-        "preferred_fps",
+        "profile_id",
+        "suggested_duration_seconds",
+        "operator_overrode_duration",
+        "effective_duration_seconds",
         "effective_num_frames",
-        "effective_fps",
-        "final_num_frames",
-        "final_fps",
-        "guidance_scale",
-        "speech_duration_seconds",
-        "video_duration_seconds",
+        "frame_rate",
+        "resolution",
+        "audio_sample_rate",
+        "prompt_token_count",
+        "prompt_token_capacity",
+        "offload_mode",
         "runtime_profile"
       ],
       "properties": {
         "effective_seed": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
-        "preferred_num_frames": {"type": "integer", "minimum": 1},
-        "preferred_fps": {"type": "number", "exclusiveMinimum": 0},
+        "suggested_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "Derived from trimmed script length and the profile's per-language speaking rate, clamped to the profile's supported range."},
+        "speaking_rate_used": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["language", "rate"],
+          "description": "Profile speaking-rate entry the suggestion came from; null when the selected language has no entry and the profile default was offered instead.",
+          "properties": {
+            "language": {"type": "string", "minLength": 1, "maxLength": 80},
+            "rate": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        "preferred_duration_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0, "description": "Operator override, when supplied."},
+        "operator_overrode_duration": {"type": "boolean", "description": "Whether the operator changed the suggested duration."},
+        "profile_id": {"type": "string", "minLength": 1, "maxLength": 200, "description": "Adapter profile identity and revision every measured value below was read from."},
+        "effective_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "From the profile's measured supported range; no bound is fixed by this schema."},
         "effective_num_frames": {"type": "integer", "minimum": 1},
-        "effective_fps": {"type": "number", "exclusiveMinimum": 0},
-        "final_num_frames": {"type": "integer", "minimum": 1},
-        "final_fps": {"type": "number", "exclusiveMinimum": 0},
-        "guidance_scale": {"type": "number"},
-        "speech_duration_seconds": {"type": "number", "exclusiveMinimum": 0},
-        "video_duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "frame_rate": {"type": "number", "exclusiveMinimum": 0, "description": "Measured profile value, not an application constant."},
+        "resolution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["width", "height"],
+          "properties": {
+            "width": {"type": "integer", "minimum": 1},
+            "height": {"type": "integer", "minimum": 1}
+          }
+        },
+        "audio_sample_rate": {"type": "integer", "minimum": 1},
+        "audio_channels": {"type": ["integer", "null"], "minimum": 1},
+        "prompt_token_count": {"type": "integer", "minimum": 0},
+        "prompt_token_capacity": {"type": "integer", "minimum": 1},
+        "offload_mode": {"type": "string", "enum": ["none", "model_cpu", "sequential_cpu", "layer_wise"]},
+        "quantization": {"type": ["string", "null"], "minLength": 1, "maxLength": 120},
+        "guidance_scale": {"type": ["number", "null"]},
+        "motion_prompt_truncation": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["original_length", "retained_length", "discarded_length"],
+          "properties": {
+            "original_length": {"type": "integer", "minimum": 0},
+            "retained_length": {"type": "integer", "minimum": 0},
+            "discarded_length": {"type": "integer", "minimum": 0}
+          }
+        },
         "runtime_profile": {"type": "string", "minLength": 1, "maxLength": 120}
       }
     },
@@ -184,7 +220,11 @@
         "device_name": {"type": ["string", "null"], "maxLength": 200},
         "allocated_bytes": {"type": ["integer", "null"], "minimum": 0},
         "reserved_bytes": {"type": ["integer", "null"], "minimum": 0},
-        "peak_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "peak_allocated_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "peak_reserved_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "free_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "total_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "reserved_gate_passed": {"type": ["boolean", "null"]},
         "unavailable_reason": {"type": ["string", "null"], "maxLength": 300}
       }
     }

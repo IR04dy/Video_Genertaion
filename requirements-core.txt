@@ -1,0 +1,19 @@
+# Control-plane dependencies (Python 3.11).
+#
+# Everything the application's domain, config, storage, device, and error layers
+# need — and nothing else. No torch, no model stack, no UI. This file installs on
+# every supported platform, including hosts with no accelerator and no CUDA wheel,
+# which is what lets the offline test suite run anywhere.
+#
+# requirements.txt and requirements-dev.txt both include this file.
+
+pydantic>=2.9,<3
+psutil>=6.0
+filelock>=3.15
+
+# Input validation and container export. Both are pure control-plane: they carry
+# no torch and no CUDA, and imageio-ffmpeg ships a static ffmpeg binary. They are
+# core rather than optional because without them the offline end-to-end test
+# cannot mux or probe a real MP4, and proving that is the point of the suite.
+pillow>=10.0
+imageio-ffmpeg>=0.5

@@ -76,6 +76,11 @@ class ModelLeaseManager(Protocol):
     def acquire(self, model_ids: Sequence[str], request_id: str): ...
 ```
 
+While a generation is active, `download()`, `retry()`, and `download_update()` MUST refuse to start and
+MUST report that the model library is temporarily read-only for the duration of the run. `list_models()`,
+`inspect()`, `check_for_update()`, `preview_delete()`, and `refresh()` remain available because they
+transfer no model content.
+
 The returned context manager releases every acquired lease on exit.
 
 ## Source rules
@@ -103,10 +108,17 @@ The returned context manager releases every acquired lease on exit.
 - Only repository configuration, selected task/tag signals, filenames and sizes, safe format/security
   signals, access result, and resolved commit are compared with installed adapter fingerprints. Hub
   card/license fields are deliberately excluded from requested expansions and application records.
-- The result declares all validated roles/native capabilities, constraints, expected bytes, adapter,
-  complete immutable auxiliary dependency closure, device/memory compatibility, and safe warnings.
-- Unknown adapters, uncovered requested roles, unreviewed executable/pickle artifacts, or target-
-  incompatible memory profiles are not reported as compatible.
+- The result declares all validated roles and native capabilities, the complete set of measured profile
+  fields (supported duration range, frame rate, resolutions, audio output, dialogue languages, accepted
+  reference kinds with counts and per-clip bounds, prompt token capacity, dialogue-tag form), expected
+  bytes, adapter, complete immutable auxiliary dependency closure, declared offload mode and
+  quantization, compatibility against **both** the accelerator-memory and host system-memory ceilings,
+  and safe warnings.
+- Unknown adapters, uncovered requested roles, unreviewed executable/pickle artifacts, or profiles that
+  breach either the accelerator-memory or the host system-memory ceiling are not reported as compatible.
+- A profile is never reported compatible on the strength of repository tags alone. Duration, frame rate,
+  resolution, audio sample rate, language set, reference limits, and prompt capacity must be present as
+  measured profile fields; a missing or unmeasured field makes the profile `incompatible`.
 
 ## Download guarantees
 
@@ -118,8 +130,10 @@ The returned context manager releases every acquired lease on exit.
 - Progress events contain counts/bytes where available but no token or full cache path.
 - Interrupted downloads remain non-ready and may be retried using Hub cache resume semantics.
 - Ready state is written only after required-file, revision, adapter, size, locally computed digest,
-  dependency, and allowed-format checks. The LatentSync `.pt` exception requires an exact reviewed
-  repository commit + SHA-256 and a tensor-only loader; other pickle-bearing content fails closed.
+  dependency, and allowed-format checks. Safetensors is the default policy; any reviewed
+  non-safetensors weight exception requires an exact reviewed repository commit plus SHA-256 and a
+  tensor-only loader. Other pickle-bearing content fails closed. The default MiniMax-H3 profile ships
+  safetensors and needs no exception.
 - Atomic inventory replacement means restart sees either the prior valid state or the new valid state.
 - A ready immutable revision is selectable without network access after restart.
 - Every adapter loads only the verified local snapshot/dependency paths with local-only behavior; a
