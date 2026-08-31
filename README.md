@@ -24,7 +24,8 @@ Setup, Foundational, and all of User Story 1 except the real adapter (T040).
 Images + voice + prompt → a verified MP4 with a non-silent speech track, a
 published bundle, and a manifest that validates against the contract schema.
 
-The dependency gate passed on `diffusers==0.40.0` / `transformers==5.16.1`, and
+The dependency gate passed on `diffusers==0.40.0` / `transformers==5.16.1` — 12/12 on the
+Windows RTX 5080 host, which is where the verdict counts — and
 found that the `Ref2VA/` subfolder **requires remote code** — its VAE configs
 carry `auto_map` and it names classes no Diffusers release exports. The adapter
 will load the repository-root modular pipeline instead.

@@ -35,6 +35,11 @@ from typing import Any
 REPO_ID = "MiniMaxAI/MiniMax-H3"
 WORKFLOW = "ref2va"
 
+# The weight-bearing components of the ref2va workflow. Every one of these must be
+# resident for a memory reading to mean anything; see the completeness check in
+# stage_load. `transformer` is absent on purpose — only t2va/fl2va denoise through it.
+REF2VA_WEIGHT_COMPONENTS = ("text_encoder", "transformer_ref", "vae", "audio_vae")
+
 # Measured against these, per plan.md. Both are ceilings, not targets.
 VRAM_CEILING_BYTES = int(13.5 * 2**30)
 HOST_CEILING_BYTES = 64 * 2**30
@@ -194,13 +199,66 @@ def stage_load(report: Report, model_path: str, quant: str) -> Any:
             "transformer_ref": _config(DiffusersBnbConfig),
         }
 
+    # Placement is decided at LOAD time, not after. bitsandbytes quantizes each tensor on
+    # whatever device it lands on, so with no device_map transformers puts the entire
+    # text_encoder on CUDA and a 16 GB card dies partway through quantizing it:
+    # "Tried to allocate 12.00 MiB ... 19.60 GiB is allocated by PyTorch" on a 15.92 GiB
+    # card. Calling enable_sequential_cpu_offload() after load_components() is far too
+    # late — the OOM happens while the weights are still being read.
+    #
+    # max_memory is wrapped in {"default": ...} deliberately. load_components() reads any
+    # dict argument as {component_name: value}, so the bare {0: ..., "cpu": ...} budget
+    # would be parsed as component names, match nothing, and be silently dropped for every
+    # component. The "default" key is what makes it reach from_pretrained intact.
+    if torch.cuda.is_available():
+        kwargs["device_map"] = "auto"
+        kwargs["max_memory"] = {
+            "default": {0: VRAM_CEILING_BYTES, "cpu": HOST_CEILING_BYTES}
+        }
+
+    # `modular_model_index.json` hardcodes pretrained_model_name_or_path
+    # "MiniMaxAI/MiniMax-H3" for every component. from_pretrained(<local dir>) therefore
+    # reads the index from disk and then fetches each component from the HUB anyway: a
+    # local --model-path is silently ignored and every byte is downloaded a second time.
+    # Overriding the field on the load_components() call redirects all components at the
+    # local tree; each spec keeps its own `subfolder`, so they resolve to
+    # <root>/text_encoder, <root>/transformer_ref, <root>/vae, and so on.
+    local_root = Path(model_path)
+    if local_root.is_dir():
+        kwargs["pretrained_model_name_or_path"] = str(local_root)
+
     started = time.monotonic()
     pipe = MiniMaxH3ModularPipeline.from_pretrained(
         model_path, trust_remote_code=False
     )
+    report.record(
+        "load",
+        source="local" if local_root.is_dir() else "hub",
+        model_path=str(model_path),
+        device_map=kwargs.get("device_map"),
+    )
     # workflow= loads only what ref2va uses, which excludes the 61.7 GiB
     # `transformer` that only the fl2va/t2va paths need.
     pipe.load_components(workflow=WORKFLOW, **kwargs)
+
+    # load_components() logs a warning and CARRIES ON when a component fails to load;
+    # it does not raise. An incomplete pipeline is therefore indistinguishable from a
+    # successful one, and the memory numbers below would describe weights that were
+    # never loaded — a 62 GiB text_encoder that silently failed reads as a triumph.
+    # Check before recording anything, so a partial load fails loudly instead.
+    present = {
+        name: getattr(pipe, name, None) is not None
+        for name in REF2VA_WEIGHT_COMPONENTS
+    }
+    report.record("load", components_present=present)
+    absent = sorted(name for name, ok in present.items() if not ok)
+    if absent:
+        raise RuntimeError(
+            f"{WORKFLOW} is missing after load_components: {', '.join(absent)}. "
+            "Diffusers logged each failure as a warning and continued, so the run "
+            "looked healthy; check the log for the per-component traceback. No memory "
+            "reading is taken, because it would describe a pipeline that never loaded."
+        )
 
     report.record(
         "load",

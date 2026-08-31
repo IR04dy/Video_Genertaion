@@ -234,6 +234,39 @@ generation: a clip whose speech is baked in cannot be repeated, reversed, or spl
 the audio. Splitting a long script across several generations and concatenating them was rejected for v1
 because it reintroduces multi-generation cost, cross-clip identity drift, and audio seams.
 
+## Declared checkpoint metadata (measured, not assumed)
+
+**Source**: `spikes/h3_feasibility.py --stage metadata`, run 2026-08-29 on the Windows RTX 5080 host
+(Python 3.11.9, torch 2.13.0+cu130, `diffusers==0.40.0`, `transformers==5.16.1`). Read from
+`MiniMaxH3ModularPipeline` loaded with `trust_remote_code=False`. Config only — the stage downloaded
+`modular_model_index.json` (2.94 kB) and no weights, confirming that `from_pretrained` reads
+configuration while `load_components` fetches tensors.
+
+| Field | Declared |
+|---|---|
+| `fps` | 24 |
+| `min_duration` / `max_duration` | 5.0 s / 15.0 s |
+| `audio_sampling_rate` | 32000 |
+| `audio_channels` | 2 |
+| `canvas_multiple` | 32 |
+| `vae_spatial_compression_ratio` | 16 |
+| `vae_frames_per_chunk` / `vae_latents_per_chunk` | 17 / 5 |
+| `vae_latent_channels` / `audio_latent_channels` | 24 / 32 |
+| `patch_size` | [1, 2, 2] |
+| `text_encoder_layer` | 50 |
+
+**The minimum duration was previously unknown.** The supported range is `[5.0, 15.0]`, not `[0, 15]`:
+this checkpoint cannot generate a clip shorter than five seconds. `DurationRange` already carries
+`min_seconds` and clamps to it, and no shared code or spec text names a duration number, so this
+required no change — which is the profile discipline working as designed rather than a coincidence.
+
+`max_duration` here is the checkpoint's *declaration*. T091 is not closed by it: the ceiling still has
+to survive an actual generation, because a declared bound that OOMs at 15 s is not a supported bound.
+
+**Still unmeasured**: peak allocator-reserved bytes, resident host footprint per precision, and
+wall-clock per generation. Those need `--stage load` and `--stage generate`, and T040 cannot honestly
+declare a profile until they exist.
+
 ## Motion-prompt capacity and truncation reporting
 
 **Decision**: Impose no application maximum on the motion prompt. Record each video adapter's text-encoder

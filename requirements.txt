@@ -10,7 +10,12 @@
 #
 #   1. pip install torch --index-url https://download.pytorch.org/whl/cu130
 #   2. pip install -r requirements.txt
-#   3. python -m pytest -m stack_compatibility     # confirms the floor was met
+#   3. pip install -r requirements-dev.txt         # pytest is NOT in this file
+#   4. python -m pytest -m stack_compatibility     # confirms the floor was met
+#
+# Step 3 is not optional on a host that runs step 4. This file carries runtime
+# dependencies only, so an install that stops at step 2 has no test runner and
+# step 4 fails with `No module named pytest`.
 #
 # Required floor, enforced by the installed libraries rather than by this file:
 #   torch >= 2.5   (transformers 5.x refuses to enable PyTorch below this;

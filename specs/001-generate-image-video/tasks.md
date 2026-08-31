@@ -58,7 +58,7 @@ adapter-protocol foundations.
 
 
 - [X] T007 Write the clean-environment gate asserting every class named by the repository root's `modular_model_index.json` — `MiniMaxH3ModularPipeline`, `MiniMaxH3Blocks`, `MiniMaxH3Transformer3DModel`, `AutoencoderKLMiniMaxH3`, `AutoencoderKLMiniMaxH3Audio`, `MiniMaxH3Scheduler`, `Qwen3VLForConditionalGeneration`, `Qwen3VLProcessor`, `Qwen2TokenizerFast` — imports with `trust_remote_code=False`, and that no root component config declares an `auto_map`, in `tests/integration/test_stack_compatibility.py`
-- [X] T008 Resolve and pin the exact Diffusers/Transformers releases that satisfy T007, recording the resolved versions in `requirements.txt`; if no release exports them, stop and mark the profile `incompatible` rather than enabling remote code — **resolved: `diffusers==0.40.0`, `transformers==5.16.1`, torch floor 2.5**
+- [X] T008 Resolve and pin the exact Diffusers/Transformers releases that satisfy T007, recording the resolved versions in `requirements.txt`; if no release exports them, stop and mark the profile `incompatible` rather than enabling remote code — **resolved: `diffusers==0.40.0`, `transformers==5.16.1`, torch floor 2.5**. Verified 12/12 on the Windows RTX 5080 host (Python 3.11.9, torch 2.13.0+cu130); on macOS 7 of the 12 skip below the torch 2.5 floor, so the production run is the one that closes this task
 
 ### Foundational tests
 
