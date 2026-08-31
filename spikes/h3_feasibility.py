@@ -17,7 +17,7 @@ point: a failed run must still be an informative run.
 
 Usage:
     python spikes/h3_feasibility.py --stage metadata
-    python spikes/h3_feasibility.py --stage all --quant int4 --report spike.json
+    python spikes/h3_feasibility.py --stage all --quant quanto-int4 --report spike.json
 """
 
 from __future__ import annotations
@@ -166,7 +166,27 @@ def stage_load(report: Report, model_path: str, quant: str) -> Any:
         torch.cuda.reset_peak_memory_stats()
 
     kwargs: dict[str, Any] = {"dtype": torch.bfloat16}
-    if quant != "none":
+
+    if quant.startswith("quanto-"):
+        # quanto is the only backend measured to do int4 on the CPU here, and int4 on the
+        # CPU is the only configuration that fits: 62.13 GiB and 61.73 GiB of transformers
+        # cannot sit on a 16 GB card at any precision, so they must be quantized in host
+        # RAM. bitsandbytes crashes natively doing this on CPU (twice, at different
+        # weights, at 1.5 GiB RSS) and torchao raises NotImplementedError for every int4
+        # CPU packing format. Measured 3.76x compression with a working CPU forward pass.
+        #
+        # Same class name in both libraries, different KEYWORD: transformers takes
+        # `weights`, diffusers takes `weights_dtype`. The BitsAndBytesConfig pair below at
+        # least shared a signature; these do not.
+        from diffusers import QuantoConfig as DiffusersQuantoConfig
+        from transformers import QuantoConfig as TransformersQuantoConfig
+
+        bits = quant.split("-", 1)[1]
+        kwargs["quantization_config"] = {
+            "text_encoder": TransformersQuantoConfig(weights=bits),
+            "transformer_ref": DiffusersQuantoConfig(weights_dtype=bits),
+        }
+    elif quant != "none":
         # Two different BitsAndBytesConfig classes, deliberately. `text_encoder` is a
         # Transformers model (Qwen3VLForConditionalGeneration) whose from_pretrained
         # type-checks the config against transformers' own class; `transformer_ref` is a
@@ -221,7 +241,11 @@ def stage_load(report: Report, model_path: str, quant: str) -> Any:
     #
     # max_memory is gone with the auto map: it budgeted a GPU/CPU split that no longer
     # happens at load time.
-    if torch.cuda.is_available():
+    # bitsandbytes only. Its 4-bit quantizer refuses any device_map that dispatches to the
+    # CPU unless the map is exclusively CPU, so text_encoder needs the explicit all-cpu
+    # form. quanto has no such validation, and transformers already loads shard by shard
+    # onto the CPU when no device_map is given.
+    if torch.cuda.is_available() and not quant.startswith("quanto-"):
         kwargs["device_map"] = {"text_encoder": {"": "cpu"}}
 
     # `modular_model_index.json` hardcodes pretrained_model_name_or_path
@@ -347,7 +371,13 @@ def main() -> int:
         default="metadata",
     )
     parser.add_argument("--model-path", default=REPO_ID)
-    parser.add_argument("--quant", choices=("none", "int8", "int4"), default="int4")
+    parser.add_argument(
+        "--quant",
+        choices=("none", "int8", "int4", "quanto-int8", "quanto-int4"),
+        default="quanto-int4",
+        help="int8/int4 are bitsandbytes; quanto-* is optimum-quanto, the only backend "
+        "measured to quantize on the CPU here.",
+    )
     parser.add_argument("--image", type=Path)
     parser.add_argument("--audio", type=Path)
     parser.add_argument("--report", type=Path)

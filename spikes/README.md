@@ -17,7 +17,8 @@ Must run on the Windows RTX 5080 host. It cannot run on macOS: PyTorch dropped
 x86_64 macOS wheels after 2.2.2, and both pinned libraries require torch >= 2.5.
 
 ```bash
-python spikes/h3_feasibility.py --stage all --quant int4 --report spike-report.json
+python spikes/h3_feasibility.py --stage all --quant quanto-int4 \
+  --model-path D:/Yousef/MiniMax-H3 --report spike-report.json
 ```
 
 Start with `--stage metadata` (no weights, seconds) to confirm the stack before

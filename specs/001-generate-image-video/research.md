@@ -147,6 +147,44 @@ The checkpoint declares its own limits as pipeline properties — `fps`, `min_du
 them from the loaded pipeline rather than restating them. That is the mechanism which keeps measured
 values out of shared code.
 
+## Quantization backend: measured, not assumed
+
+**Decision**: Quantize the two large transformers with **optimum-quanto** at int4, resident in host
+RAM, and stream them to the accelerator with sequential CPU offload. Not bitsandbytes.
+
+**Source**: measured on the Windows RTX 5080 host, 2026-08-31, torch 2.13.0+cu130.
+
+Only one configuration fits, and the arithmetic decides it before any backend does:
+
+| Placement | Resident | Verdict |
+|---|---|---|
+| int4 in host RAM | 16.5 + 16.4 + 10.3 GiB VAE = **~43 GiB** | fits 64 GB |
+| int8 in host RAM | 31.1 + 30.9 + 10.3 = **72.2 GiB** | over 64 GB |
+| int4 on the accelerator | 15.5 GiB for *one* component | over the 13.5 GiB ceiling |
+
+`text_encoder` is 62.13 GiB and `transformer_ref` 61.73 GiB at BF16. Neither fits on a 16 GB card at
+any precision, so a GPU-resident load was never possible and `device_map="auto"` fails by design
+rather than by misconfiguration. int8 is not a fallback: it exceeds the host ceiling even when the
+VAEs are quantized too. **The requirement is therefore int4 quantization performed on the CPU**, and
+each backend was tested against exactly that.
+
+| Backend | Result |
+|---|---|
+| bitsandbytes, CUDA | Quantizes correctly, but cannot hold a component within the VRAM ceiling. |
+| bitsandbytes, CPU | Native access violation mid-load, twice, at different weights (543/1058, then 0/1058), at 1.5 GiB RSS. Not memory, and `quantize_4bit` and `Params4bit(...).to("cpu")` both pass in isolation on every realistic shape — the corruption appears only through the loader's own conversion path. Unusable. |
+| torchao 0.18, CPU | No int4 CPU path exists. `PLAIN`/`PRESHUFFLED` require `mslk >= 1.0.0`, which is not published (PyPI `mslk` is an unrelated 0.0.0 stub — do not install it); `TILE_PACKED_TO_4D` is CUDA tinygemm; `PLAIN_INT32` raises `NotImplementedError` for CPU. |
+| optimum-quanto, CPU | **Works.** 3.76x compression on a 4096x4096 BF16 linear (33,556,137 to 8,915,481 bytes serialized) with a working CPU forward pass. The shortfall from 4x is scale and zero-point overhead. |
+
+**Trap worth recording**: both libraries export a `QuantoConfig`, and the keyword differs —
+`transformers.QuantoConfig(weights="int4")` versus `diffusers.QuantoConfig(weights_dtype="int4")`.
+The `BitsAndBytesConfig` pair has the same name collision but at least shares a signature; passing
+one library's config to the other raises "`quantization_config` is not a `BitsAndBytesConfig`", a
+message that never mentions that two identically named classes exist.
+
+**Alternatives considered**: GGUF was rejected because no pre-quantized MiniMax-H3 checkpoint exists.
+HQQ is exported by Transformers but not by Diffusers, so it cannot cover `transformer_ref`. Disk
+offload of BF16 weights was rejected as it re-reads 134 GiB per denoising step.
+
 ## Unbounded inference time
 
 **Decision**: Impose no latency target, SLA, maximum runtime, runtime estimate, or cost-confirmation gate.
