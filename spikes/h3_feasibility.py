@@ -199,22 +199,30 @@ def stage_load(report: Report, model_path: str, quant: str) -> Any:
             "transformer_ref": _config(DiffusersBnbConfig),
         }
 
-    # Placement is decided at LOAD time, not after. bitsandbytes quantizes each tensor on
-    # whatever device it lands on, so with no device_map transformers puts the entire
-    # text_encoder on CUDA and a 16 GB card dies partway through quantizing it:
-    # "Tried to allocate 12.00 MiB ... 19.60 GiB is allocated by PyTorch" on a 15.92 GiB
-    # card. Calling enable_sequential_cpu_offload() after load_components() is far too
-    # late — the OOM happens while the weights are still being read.
+    # Nothing is pinned to the GPU, on purpose. At int4 the text encoder is ~15.5 GiB and
+    # transformer_ref ~15.4 GiB, against a 13.5 GiB ceiling on a 16 GB card: neither
+    # component fits on the accelerator even quantized, so a GPU-resident load was never
+    # possible here. The weights are quantized and held in host RAM (~41 GiB with the
+    # unquantized VAEs) and streamed to the card layer by layer by the offload applied
+    # after loading. `device_map="auto"` failed precisely because accelerate refused to
+    # pretend otherwise.
     #
-    # max_memory is wrapped in {"default": ...} deliberately. load_components() reads any
-    # dict argument as {component_name: value}, so the bare {0: ..., "cpu": ...} budget
-    # would be parsed as component names, match nothing, and be silently dropped for every
-    # component. The "default" key is what makes it reach from_pretrained intact.
+    # The map is per component because the two libraries disagree about what is legal:
+    #
+    #   text_encoder     transformers allows an ALL-cpu map — its guard is
+    #                    `values != {"cpu"} and "cpu" in values` — but rejects a mixed
+    #                    GPU/CPU one under bnb 4-bit.
+    #   transformer_ref  diffusers' bnb quantizer rejects `cpu` anywhere in a device_map
+    #                    with no all-cpu exception, so it is passed none and loads on the
+    #                    CPU by default.
+    #   audio_vae        AutoencoderKLMiniMaxH3Audio does not implement
+    #                    `_no_split_modules`, so any device_map raises outright.
+    #   vae              loads either way; left alone.
+    #
+    # max_memory is gone with the auto map: it budgeted a GPU/CPU split that no longer
+    # happens at load time.
     if torch.cuda.is_available():
-        kwargs["device_map"] = "auto"
-        kwargs["max_memory"] = {
-            "default": {0: VRAM_CEILING_BYTES, "cpu": HOST_CEILING_BYTES}
-        }
+        kwargs["device_map"] = {"text_encoder": {"": "cpu"}}
 
     # `modular_model_index.json` hardcodes pretrained_model_name_or_path
     # "MiniMaxAI/MiniMax-H3" for every component. from_pretrained(<local dir>) therefore
