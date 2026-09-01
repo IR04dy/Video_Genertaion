@@ -53,7 +53,8 @@ remains in git.
 
 ### Session 2026-08-27 (model change)
 
-- Q: Which model provides the default reviewed video profile? → A: `MiniMaxAI/MiniMax-H3` Ref2VA replaces CogVideoX-5B-I2V as the default. The adapter registry and Hugging Face URL selection are unchanged: H3 is the default profile, not the only one, and further reviewed profiles are added later.
+- Q: Which model provides the default reviewed video profile? → A: `MiniMaxAI/MiniMax-H3` Ref2VA replaced CogVideoX-5B-I2V as the default. The adapter registry and Hugging Face URL selection are unchanged: it is the default profile, not the only one, and further reviewed profiles are added later.
+- Q: (2026-09-01) H3 proved unrunnable on the target hardware — one indivisible component is 15.5 GiB at int4, over the 13.5 GiB accelerator ceiling. What replaces it? → A: `Wan-AI/Wan2.2-S2V-14B` for video and native lip sync, plus a separate TTS for voice cloning, composed behind a single adapter so the joint interface is unchanged. The voice model is pending a packaging decision.
 - Q: How are speech and lip synchronization produced? → A: Natively and jointly by the video model. The dedicated text-to-speech stage, the dedicated lip-sync stage, the cross-provider timebase bridge, and the generated-frame face preflight are all removed.
 - Q: Where does spoken content come from? → A: From the speech script, embedded in the prompt as `<d>[language]...</d>` dialogue tags. The reference recording is never played back and MUST say different words from the script; the UI surfaces this rule.
 - Q: Is voice-cloning consent still required? → A: Yes, unchanged. This is still voice cloning; only the model performing it changed. Per-request attestation defaults and resets to false, resets whenever the reference audio changes, is bound server-side to request ID and reference-audio SHA-256, and is recorded in metadata.

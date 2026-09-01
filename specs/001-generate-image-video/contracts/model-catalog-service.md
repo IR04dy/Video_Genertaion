@@ -132,8 +132,11 @@ The returned context manager releases every acquired lease on exit.
 - Ready state is written only after required-file, revision, adapter, size, locally computed digest,
   dependency, and allowed-format checks. Safetensors is the default policy; any reviewed
   non-safetensors weight exception requires an exact reviewed repository commit plus SHA-256 and a
-  tensor-only loader. Other pickle-bearing content fails closed. The default MiniMax-H3 profile ships
-  safetensors and needs no exception.
+  tensor-only loader. Other pickle-bearing content fails closed. **The default Wan2.2-S2V profile is
+  such an exception**: its T5 encoder (`models_t5_umt5-xxl-enc-bf16.pth`) and VAE (`Wan2.1_VAE.pth`) ship
+  as `.pth` pickles, not safetensors. They are admitted under an exact reviewed commit plus SHA-256 and a
+  tensor-only load — `torch.load` defaults to `weights_only=True` from torch 2.6, which the stack gate
+  asserts has not regressed. This is a distinct execution vector from `auto_map`, which covers neither.
 - Atomic inventory replacement means restart sees either the prior valid state or the new valid state.
 - A ready immutable revision is selectable without network access after restart.
 - Every adapter loads only the verified local snapshot/dependency paths with local-only behavior; a

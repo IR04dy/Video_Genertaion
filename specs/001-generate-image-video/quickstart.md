@@ -49,7 +49,7 @@ Open `http://127.0.0.1:7860`. Public sharing remains disabled. An Apple Silicon 
 python -m pytest -m mps
 ```
 
-Only adapters declaring MPS support may run. The production MiniMax-H3 profile is not expected on macOS;
+Only adapters declaring MPS support may run. The production Wan2.2-S2V profile is not expected on macOS;
 unsupported profiles fail before allocation and never import or execute CUDA-only code.
 
 ## Windows 11 RTX 5080 production setup
@@ -75,11 +75,11 @@ There is a **single environment**. Collapsing to one joint audio/video provider 
 second virtual environment and its separately locked worker stack, because there is no longer a second
 heavyweight provider with conflicting dependency pins.
 
-H3 is loaded from the repository **root** (`modular_model_index.json`) as a `MiniMaxH3ModularPipeline`,
-selecting the `ref2va` workflow — **not** from the `Ref2VA/` subfolder, whose VAE configs declare
-`auto_map` remote code. The lock must supply `diffusers==0.40.0` and `transformers==5.16.1` (or later
-releases exporting the same classes). Verify before anything else, because the profile stays
-`incompatible` rather than falling back to remote repository code:
+Wan2.2-S2V is loaded through **DiffSynth**, not Diffusers: neither `WanSpeechToVideoPipeline` nor
+`WanS2VTransformer3DModel` exists in any Diffusers release, so that route would mean running a fork of
+the core library. The lock must supply `diffsynth==2.1.5` and `transformers==5.16.1`. Verify before
+anything else, because the profile stays `incompatible` rather than falling back to remote repository
+code:
 
 ```powershell
 python -m pytest -m stack_compatibility
@@ -88,10 +88,11 @@ python -m pytest -m stack_compatibility
 That gate is authoritative. For a quick manual check:
 
 ```powershell
-python -c "from diffusers import MiniMaxH3ModularPipeline, MiniMaxH3Blocks, MiniMaxH3Transformer3DModel, AutoencoderKLMiniMaxH3, AutoencoderKLMiniMaxH3Audio, MiniMaxH3Scheduler; from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor, Qwen2TokenizerFast; print('H3 classes available')"
+python -c "from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig; import diffsynth.models.wan_video_dit_s2v; import torch, inspect; print('stack available; torch.load weights_only default =', inspect.signature(torch.load).parameters['weights_only'].default)"
 ```
 
-The gate needs **torch >= 2.5**; Transformers 5.x disables its model classes below that. PyTorch ships no
+The gate needs **torch >= 2.6**: Transformers 5.x disables its model classes below 2.5, and 2.6 is
+where `torch.load` defaults to `weights_only=True` — the gate on Wan's `.pth` pickles. PyTorch ships no
 x86_64 macOS wheel above 2.2.2, so this check cannot run on an Intel Mac at all — the offline suite still
 can, because it never imports Diffusers.
 
@@ -122,12 +123,13 @@ as an authentication/access error.
 In the Model Library section, submit the default reviewed profile's repository URL:
 
 ```text
-Video + native voice + native lip sync:  https://huggingface.co/MiniMaxAI/MiniMax-H3
+Video + native lip sync:  https://huggingface.co/Wan-AI/Wan2.2-S2V-14B
+Voice cloning:            (TTS repository — pending the packaging decision)
 ```
 
-One model covers all three roles. There is no separate speech model and no separate lip-sync model to
-download. Only the **Ref2VA** checkpoint is used, because it is the mode that accepts an image reference
-plus an audio reference.
+Two models cover the three roles, behind one adapter. Wan covers video **and** lip sync, because audio
+conditions its denoiser directly rather than being applied as a later pass. There is no separate
+lip-sync model to download. The working set is **42.60 GiB across 15 files**.
 
 Before download the app shows the resolved immutable commit, detected adapter and roles, expected size,
 and compatibility against **both** the accelerator-memory and host system-memory ceilings, along with the
@@ -201,8 +203,9 @@ confirmation prompt — a run measured in hours is the expected operating point,
 shows a completion fraction during inference and decoding so you can tell it is working, and cancelling
 takes effect within seconds.
 
-Local output is **768p short side**. 2K requires H3-Regenerate-2K, which is not part of the open-source
-release and would require a hosted API call this application does not make.
+Local output resolution is a measured profile field; DiffSynth's low-VRAM path uses 448x832. Frame
+count must be **4n+1** at 16 fps, so the duration grid is 0.25 s and the effective duration is rounded
+up to the next legal count with the audio tail padded to match.
 
 ## Successful retention and Request History
 
@@ -241,13 +244,13 @@ python -m pytest -m cuda
 
 The offline suite downloads no weights and uses a stub adapter. It also runs a second time against a
 fixture profile whose duration, frame rate, resolution, language set, reference limits, and token
-capacity all differ from H3's — that pass fails if any model-specific value has leaked into shared code. Model-download tests verify fixed Hub
+capacity all differ from the production profile's — that pass fails if any model-specific value has leaked into shared code. Model-download tests verify fixed Hub
 endpoint, no remote code/license handling, immutable dependencies, disk reserve, offline restart,
 manual update coexistence, deletion races, and partial-download handling. Windows CUDA acceptance
-The blocking stack spike verifies that the H3 classes load with `trust_remote_code=False` and measures
+The blocking stack spike verifies that the model-stack classes load with `trust_remote_code=False` and measures
 resident footprint per precision against both ceilings; failure leaves the profile `incompatible` before
-architecture is frozen. Windows CUDA acceptance verifies one joint `ref2va`-workflow generation end to end, measures
-the real supported duration ceiling on this card rather than assuming 15 s, zero hidden downloads
+architecture is frozen. Windows CUDA acceptance verifies one composite generation (speech then video)
+end to end, measures the real supported duration ceiling on this card, zero hidden downloads
 during inference, peak at or below 13.5 GiB allocator-reserved accelerator memory on the display-attached
 target, host resident memory at or below the configured ceiling, complete retained artifacts, and final
 audio and video duration agreeing within one frame at the profile's frame rate. A long-runtime run proves
@@ -260,8 +263,8 @@ model on a single 16 GB card.
 
 ## Recovery order
 
-1. Confirm driver, PyTorch/CUDA/capability versions, and that the pinned Diffusers and Transformers
-   releases actually export the H3 classes.
+1. Confirm driver, PyTorch/CUDA/capability versions, and that the pinned DiffSynth and Transformers
+   releases actually export the model-stack classes.
 2. Confirm no other process materially consumes GPU or system memory.
 3. Retry after the application releases the failed provider.
 4. Select a profile variant with stronger offload or heavier quantization that passed the same adapter

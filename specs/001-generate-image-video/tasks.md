@@ -31,7 +31,7 @@ model/GPU tests are opt-in behind markers.
 **Purpose**: Create the cross-platform Python skeleton and dependency/test configuration.
 
 - [X] T001 Create the planned source, adapter, and test directories with package markers in `adapters/__init__.py`, `tests/__init__.py`, `tests/contract/__init__.py`, `tests/integration/__init__.py`, `tests/unit/__init__.py`, and `outputs/.gitkeep`
-- [X] T002 Declare bounded Python 3.11 runtime dependencies — Diffusers and Transformers releases exporting the H3 classes, Accelerate, a reviewed quantization backend, Hugging Face Hub, Safetensors, Gradio, Pillow, NumPy, SoundFile/librosa, imageio, imageio-ffmpeg, Pydantic 2.x, psutil, filelock — with PyTorch deliberately excluded so the platform wheel is never replaced, in `requirements.txt`
+- [X] T002 Declare bounded Python 3.11 runtime dependencies — **retargeted 2026-09-01** to DiffSynth (Wan2.2-S2V) plus the Transformers release carrying Wav2Vec2, Accelerate, a reviewed quantization backend, Hugging Face Hub, Safetensors, Gradio, Pillow, NumPy, SoundFile/librosa, imageio, imageio-ffmpeg, Pydantic 2.x, psutil, filelock — with PyTorch deliberately excluded so the platform wheel is never replaced, in `requirements.txt`
 - [X] T003 [P] Declare pytest, pytest-cov, lint, format, and type-check dependencies in `requirements-dev.txt`
 - [X] T004 [P] Configure offline-by-default discovery and the `stack_compatibility`, `cuda`, `mps`, and `model_download` markers in `pytest.ini`
 - [X] T005 [P] Ignore Python caches, virtual environments, `.model-cache/`, `outputs/` except its placeholder, `.env`, and generated media in `.gitignore`
@@ -48,17 +48,18 @@ adapter-protocol foundations.
 
 ### Blocking dependency gate
 
-> **Gate outcome (resolved).** The gate found that the `Ref2VA/` subfolder cannot be loaded with
-> `trust_remote_code=False`: its `model_index.json` names classes no upstream release exports, and its
-> `video_vae`/`audio_vae` configs carry `auto_map` entries pointing at bundled `.py` modules. The
-> architecture therefore loads the repository **root** `modular_model_index.json` as a
-> `MiniMaxH3ModularPipeline` with `load_components(workflow="ref2va")`, which uses only upstream classes
-> and ships no Python beside its weights. Every downstream task naming an H3 class must use the root
-> names. See `research.md` → "No remote code required — via the root modular layout".
+> **Gate outcome (retargeted 2026-09-01).** The original gate resolved in H3's favour, then H3 was
+> abandoned for fitting reasons, not loading reasons: its largest indivisible component is 15.5 GiB at
+> int4, over the 13.5 GiB accelerator ceiling. The stack is now **Wan2.2-S2V-14B** for VIDEO + LIP_SYNC,
+> loaded through **DiffSynth** because neither `WanSpeechToVideoPipeline` nor `WanS2VTransformer3DModel`
+> exists in any Diffusers release. Neither repository declares `auto_map`, so `trust_remote_code` stays
+> false; Wan's `.pth` pickles are covered instead by `torch.load`'s `weights_only=True` default. The
+> **VOICE** half is unresolved — `chatterbox-tts` hard-pins `torch==2.6.0`, which would disable the
+> RTX 5080. See `research.md` → "Stack decision superseded" and "Voice packaging conflict".
 
 
-- [X] T007 Write the clean-environment gate asserting every class named by the repository root's `modular_model_index.json` — `MiniMaxH3ModularPipeline`, `MiniMaxH3Blocks`, `MiniMaxH3Transformer3DModel`, `AutoencoderKLMiniMaxH3`, `AutoencoderKLMiniMaxH3Audio`, `MiniMaxH3Scheduler`, `Qwen3VLForConditionalGeneration`, `Qwen3VLProcessor`, `Qwen2TokenizerFast` — imports with `trust_remote_code=False`, and that no root component config declares an `auto_map`, in `tests/integration/test_stack_compatibility.py`
-- [X] T008 Resolve and pin the exact Diffusers/Transformers releases that satisfy T007, recording the resolved versions in `requirements.txt`; if no release exports them, stop and mark the profile `incompatible` rather than enabling remote code — **resolved: `diffusers==0.40.0`, `transformers==5.16.1`, torch floor 2.5**. Verified 12/12 on the Windows RTX 5080 host (Python 3.11.9, torch 2.13.0+cu130); on macOS 7 of the 12 skip below the torch 2.5 floor, so the production run is the one that closes this task
+- [X] T007 Write the clean-environment gate — **rewritten 2026-09-01** for the Wan/DiffSynth stack: assert `diffsynth.pipelines.wan_video` exports `WanVideoPipeline` and `ModelConfig`, that the S2V denoiser `wan_video_dit_s2v` ships, that no component config on either repository declares an `auto_map`, that the voice repository ships no Python at all, that `torch.load` still defaults to `weights_only=True` (the pickle vector `auto_map` does not cover), and that the installed `chatterbox` module is the TTS rather than the unrelated 0.0.0 PyPI IRC-bot stub — in `tests/integration/test_stack_compatibility.py`
+- [X] T008 Resolve and pin the exact Diffusers/Transformers releases that satisfy T007, recording the resolved versions in `requirements.txt`; if no release exports them, stop and mark the profile `incompatible` rather than enabling remote code — **reopened 2026-09-01**: video half resolved to `diffsynth==2.1.5` / `transformers==5.16.1`, torch floor raised to 2.6 for the `weights_only` default; the voice half is deliberately unpinned pending the packaging decision. 4 network assertions pass; the 4 package assertions await an install on the Windows RTX 5080 host, which is the run that closes this task
 
 ### Foundational tests
 
@@ -78,7 +79,7 @@ adapter-protocol foundations.
 - [X] T019 Implement settings loading, `pathlib.Path` normalization, fixed roots, disk reserve, and dual resource ceilings in `config.py`
 - [X] T020 Implement path containment, symlink and reparse-point refusal, atomic manifest writes under a cross-platform lock, and disk estimation in `storage.py`
 - [X] T021 [P] Define the joint audio/video adapter protocol and the capability-profile contract, with progress callbacks and cooperative cancellation checks, in `adapters/base.py`
-- [X] T022 Create reusable fixtures — fake adapters, sample images, waveform fixtures, temporary roots, capability fakes, and a **fixture profile whose measured values all differ from H3's** — in `tests/conftest.py`
+- [X] T022 Create reusable fixtures — fake adapters, sample images, waveform fixtures, temporary roots, capability fakes, and a **fixture profile whose measured values all differ from the production profile's** — in `tests/conftest.py`
 
 **Checkpoint**: The stack is proven loadable, foundations pass offline, and story work can start.
 
@@ -115,7 +116,7 @@ bundle, and identical preview/download paths.
 - [X] T037 [US1] Implement dialogue-tag prompt assembly, token measurement against profile capacity, motion-prompt truncation with recorded override, and retention of the assembled prompt in `prompting.py`
 - [X] T038 [US1] Implement duration suggestion from script length and per-language speaking rate, clamping, missing-language fallback, override handling, and `DurationDecision` construction in `execution.py`
 - [X] T039 [P] [US1] **[implemented in Stage 1, hoisted after T021]** Implement the deterministic offline stub adapter producing fixture frames and a fixture waveform with a declared capability profile in `adapters/stub.py`
-- [ ] T040 [P] [US1] Implement the `minimax-h3` adapter — loading the **repository-root modular pipeline** (`MiniMaxH3ModularPipeline` / `MiniMaxH3Blocks` via `modular_model_index.json`) with `trust_remote_code=False`, declared offload mode and quantization, and a capability profile carrying every measured field — in `adapters/minimax_h3.py`. **Not the `Ref2VA/` subfolder**: T007 proved its VAE configs carry `auto_map` and it names classes no Diffusers release exports, so that path requires remote code and is prohibited
+- [ ] T040 [P] [US1] Implement the composite adapter — one `JointAdapter` whose `generate()` synthesizes speech first, then drives `Wan2.2-S2V-14B` through `diffsynth`'s `WanVideoPipeline` with that audio, returning frames and speech together — in `adapters/wan_s2v.py`. `JointAdapter` describes the **interface**, not the model, so two models behind one `generate()` needs no protocol change. Declare `roles={VIDEO,VOICE,LIP_SYNC}` and `native_capabilities={VIDEO,LIP_SYNC}`, which is the shape `domain._check_roles` already validates. Load each stage and free it before the next: nothing co-resides. Round measured speech duration up to the next legal frame count (**4n+1**) and pad the audio tail; resample to 16 kHz for conditioning only, keeping the TTS rate for delivery
 - [X] T041 [US1] Implement reviewed adapter fingerprints and measured capability-profile resolution in `model_registry.py`
 - [X] T042 [US1] Implement container export, dual-stream verification, non-silence checking over the spoken region, duration agreement within one frame, and atomic publication in `export.py`
 - [X] T043 [US1] Implement bundle publication — staging, manifest writing, artifact inventory, and the atomic rename to `outputs/<request-id>/` — in `storage.py`
@@ -123,8 +124,8 @@ bundle, and identical preview/download paths.
 - [X] T045 [US1] Build the Gradio Blocks UI with multi-image upload, reference-audio upload displaying the timbre-anchor and different-words rule, motion prompt, speech script, language selector, editable suggested duration, consent checkbox, advanced controls, video player, and download button in `app.py`
 - [X] T046 [US1] Wire the submit handler to `VideoGenerationEngine`, map results to preview and download outputs, reset consent after every submit and on audio change, and enforce loopback binding with sharing disabled in `app.py`
 
-**Checkpoint**: The P1 workflow produces a verified MP4 offline with stubs and exposes the real H3
-profile behind explicit model configuration.
+**Checkpoint**: The P1 workflow produces a verified MP4 offline with stubs and exposes the real
+Wan2.2-S2V profile behind explicit model configuration.
 
 ---
 
@@ -238,9 +239,9 @@ size, dependency links, and that no mutation control exists.
 - [ ] T088 [P] Validate every command and expected output in `specs/001-generate-image-video/quickstart.md` on a clean macOS environment
 - [ ] T089 [P] Add explicit Hub-token, remote-code-prohibition, loopback-binding, and plaintext-disclosure checks in `tests/unit/test_config.py`
 - [ ] T090 Run and fix formatting, linting, type checking, the offline suite, and coverage gates across all modules, `adapters/`, and `tests/`
-- [ ] T091 **[hoisted to Stage 0 — blocked: needs the Windows RTX 5080 host]** Measure the **real supported duration ceiling** for the H3 profile on the RTX 5080 and record it as a profile field rather than assuming the card's stated 15 s, in `adapters/minimax_h3.py`. Source the value from `MiniMaxH3ModularPipeline.max_duration` and confirm it against an actual generation; run `spikes/h3_feasibility.py` first
-- [ ] T092 **[hoisted to Stage 0 — blocked: needs the Windows RTX 5080 host]** Measure resident host footprint per precision against 64 GB and peak allocator-reserved memory against 13.5 GiB, recording both in the profile, in `tests/integration/test_cuda_smoke.py`. The `ref2va` working set is 134.12 GiB at BF16, so establish which quantization is actually resident before T040 declares one; run `spikes/h3_feasibility.py --stage load` first
-- [ ] T093 Run the Windows RTX 5080 acceptance — clean install, one joint `ref2va`-workflow generation, zero hidden downloads during inference, dual-ceiling compliance, complete retained artifacts, and audio/video duration agreement — in `tests/integration/test_cuda_smoke.py`
+- [ ] T091 **[hoisted to Stage 0 — blocked: needs the Windows RTX 5080 host]** Measure the **real supported duration ceiling** on the RTX 5080 and record it as a profile field, in `adapters/wan_s2v.py`. FramePack plus the multi-clip path removes the hard wall H3 had, so there is no vendor number to harvest — the ceiling is whatever stays practical on this card and must come from actual generations. Confirm the 16 fps frame rate and the 4n+1 grid at the same time; run the Wan spike first
+- [ ] T092 **[hoisted to Stage 0 — blocked: needs the Windows RTX 5080 host]** Measure resident host footprint per precision against 64 GB and peak allocator-reserved memory against 13.5 GiB, recording both in the profile, in `tests/integration/test_cuda_smoke.py`. The working set is 42.60 GiB at BF16 with a 30.35 GiB largest component; DiffSynth's disk-offload path takes an explicit `vram_limit`, so measure what that budget actually holds before T040 declares a precision. Run the Wan spike `--stage load` first
+- [ ] T093 Run the Windows RTX 5080 acceptance — clean install, one composite generation (speech then video), zero hidden downloads during inference, dual-ceiling compliance, complete retained artifacts, and audio/video duration agreement after frame-grid rounding — in `tests/integration/test_cuda_smoke.py`
 - [ ] T094 Record measured wall-clock baselines in `README.md` **without introducing any SLA or latency gate**
 
 ---
@@ -250,7 +251,7 @@ size, dependency links, and that no mutation control exists.
 ### Phase dependencies
 
 - **Setup (Phase 1)**: starts immediately.
-- **Foundational (Phase 2)**: depends on Setup. **T007–T008 gate everything** — if the H3 classes do
+- **Foundational (Phase 2)**: depends on Setup. **T007–T008 gate everything** — if the model-stack classes do
   not load with `trust_remote_code=False`, stop and resolve dependencies before any further work.
 - **US1 (Phase 3)**: depends on Foundational. Delivers the MVP.
 - **US2 (Phase 4)**: depends on Foundational. Independent of US1 except for shared domain records.
@@ -290,7 +291,7 @@ Setup → Foundational(gate) → US1 (MVP) → History → Polish
 1. Complete Setup and Foundational, treating T007–T008 as a hard gate.
 2. Complete US1 tests, then stubs, references, prompting, duration, export, engine, and UI.
 3. Validate the offline stub bundle independently.
-4. Integrate the real H3 Ref2VA profile behind explicit model configuration.
+4. Integrate the real Wan2.2-S2V profile behind explicit model configuration.
 
 ### Incremental delivery
 
@@ -331,7 +332,7 @@ T001, T003, T004, T005  →  T007 → T008  →  [SPIKE]  →  T091, T092
 
 T002 stays a stub here; T008 is what fills in the real pins.
 
-The spike is **not in tasks.md and should not be product code** — a throwaway script that `hf download`s the Ref2VA checkpoint, loads it under sequential/layer-wise offload plus quantization, and generates one clip at the minimum duration. It answers three things:
+The spike is **not in tasks.md and should not be product code** — a throwaway script that fetches the Wan2.2-S2V weights, loads them through DiffSynth's disk-offload path under an explicit `vram_limit`, and generates one clip at the minimum legal frame count. It answers three things:
 
 1. Does a 33B omni-model produce a frame at all on 16 GB VRAM?
 2. Peak reserved bytes vs. the 13.5 GiB gate; peak host RSS vs. 64 GB.
@@ -357,7 +358,7 @@ T023–T034  →  T035–T038  →  T041–T044  →  T068, T069  →  T045, T04
 
 **Hoist T068 + T069 (progress emission) out of US3 into US1**, before the UI lands. They're rated P3 as a *user-facing* feature, but for a run measured in hours they're your only way to distinguish a slow generation from a hung one — you'll need them while debugging Stage 3, not after. Leave T070 (the rendered panel) at P3 where it belongs.
 
-## Stage 3 — MVP on real H3
+## Stage 3 — MVP on real Wan2.2-S2V
 
 ```
 T040  →  T093

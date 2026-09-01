@@ -4,10 +4,11 @@ The reference implementation of `JointAdapter`, and the thing every offline test
 runs against. It writes real PNG frames and a real WAV using only the standard
 library, so the offline suite needs no Pillow, no NumPy, no torch, and no weights.
 
-Its profile values are **arbitrary and deliberately unlike MiniMax-H3's** — 12
-fps, 96x64, 8 kHz mono, a made-up language. If a test passes against H3 but fails
-here, something measured has leaked out of a profile into shared code, which is
-exactly what `tests/unit/test_profile_agnostic.py` exists to catch.
+Its profile values are **arbitrary and deliberately unlike the production
+profile's** — 12 fps, 96x64, 8 kHz mono, a made-up language. If a test passes
+against the real model but fails here, something measured has leaked out of a
+profile into shared code, which is exactly what
+`tests/unit/test_profile_agnostic.py` exists to catch.
 """
 
 from __future__ import annotations

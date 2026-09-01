@@ -9,7 +9,7 @@ answer is recorded in the adapter profile or in `research.md`.
 
 | Script | Question | Answer recorded in |
 |---|---|---|
-| `h3_feasibility.py` | Does MiniMax-H3 Ref2VA load and generate on one 16 GB RTX 5080 with 64 GB RAM, and what does it actually cost? | `adapters/minimax_h3.py` profile (T040, T091, T092) |
+| `wan_s2v_feasibility.py` | Does Wan2.2-S2V load and generate on one 16 GB RTX 5080 with 64 GB RAM under DiffSynth's disk-offload path, and what does it actually cost? | `adapters/wan_s2v.py` profile (T040, T091, T092) |
 
 ## Running the feasibility spike
 
@@ -17,8 +17,8 @@ Must run on the Windows RTX 5080 host. It cannot run on macOS: PyTorch dropped
 x86_64 macOS wheels after 2.2.2, and both pinned libraries require torch >= 2.5.
 
 ```bash
-python spikes/h3_feasibility.py --stage all --quant quanto-int4 \
-  --model-path D:/Yousef/MiniMax-H3 --report spike-report.json
+python spikes/wan_s2v_feasibility.py --stage all \
+  --model-path D:/Yousef/Wan2.2-S2V-14B --report spike-report.json
 ```
 
 Start with `--stage metadata` (no weights, seconds) to confirm the stack before

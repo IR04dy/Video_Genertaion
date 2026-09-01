@@ -1,7 +1,7 @@
 """Shared fixtures (T022).
 
 The important one is `fixture_profile_kwargs`: a profile whose every measured
-value differs from both MiniMax-H3's and the stub's. `test_profile_agnostic.py`
+value differs from both the production profile's and the stub's. `test_profile_agnostic.py`
 re-runs the suite against it, so any duration, frame rate, resolution, sample
 rate, language, reference limit, or token capacity that has leaked out of a
 profile into shared code shows up as a failure there rather than in production.
@@ -65,11 +65,14 @@ def sample_profile_kwargs() -> dict:
 
 @pytest.fixture
 def fixture_profile_kwargs() -> dict:
-    """A profile sharing NO measured value with H3 or the stub.
+    """A profile sharing NO measured value with production or the stub.
 
-    H3: 24 fps, 768p short side, 32 kHz stereo, 11 languages, 4-15 s.
+    Wan2.2-S2V: 16 fps, 448x832, TTS-rate audio, duration unmeasured.
     Stub: 12 fps, 96x64, 8 kHz mono, 2 languages, 1-6 s.
     Here: 7 fps, 48x32, 11025 Hz stereo, 1 language, 3-13 s.
+
+    Re-check for collisions whenever the production profile changes: the point of
+    this fixture is that no value here is shared with a real one.
     """
     return {
         "adapter_key": "profile-agnostic-fixture",

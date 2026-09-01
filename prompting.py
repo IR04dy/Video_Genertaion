@@ -20,8 +20,8 @@ from domain import AssembledPrompt, DialogueSegment, ModelProfile, MotionTruncat
 from errors import LanguageError, ValidationError
 
 STRUCTURING_VERSION = "1"
-"""Locally built prompt structuring. H3-Context-IR is a hosted service we do not
-call, so the structuring is ours and is versioned so bundles stay attributable."""
+"""Locally built prompt structuring. No hosted structuring service is called, so
+the structuring is ours and is versioned so bundles stay attributable."""
 
 Tokenizer = Callable[[str], Sequence[object]]
 

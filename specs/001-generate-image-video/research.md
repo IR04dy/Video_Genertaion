@@ -1,7 +1,87 @@
 # Research: Generate Image-Conditioned Lip-Synced Video
 
 All technical unknowns from the clarified specification are resolved below. Links point to primary
-project or vendor documentation reviewed on 2026-08-27.
+project or vendor documentation reviewed on 2026-08-27, except where a later measurement supersedes
+them — see **Stack decision superseded** immediately below.
+
+## Stack decision superseded (2026-09-01)
+
+**Decision**: Abandon `MiniMaxAI/MiniMax-H3`. Cover the three roles with **two models behind one
+adapter**: `Wan-AI/Wan2.2-S2V-14B` for VIDEO + LIP_SYNC, and a still-unresolved TTS for VOICE.
+
+**Rationale**: H3 does not fit this hardware, and the reason is arithmetic rather than engineering.
+`text_encoder` is 62.13 GiB and `transformer_ref` 61.73 GiB at BF16. At int4 the transformer is still
+**15.5 GiB, over the 13.5 GiB accelerator ceiling** — so even a successful load would stream 15.5 GiB
+across PCIe on every denoising step. Every observed failure (a 47 GiB quantization peak, Windows page-file
+error 1455, 2082 s/shard thrashing) was a symptom of that. The lesson worth carrying forward: check
+*largest indivisible component* against the card ceiling before checking total working set, because
+offload fixes the total and cannot fix the component.
+
+Wan2.2-S2V's largest component is 30.35 GiB BF16, which is **7.6 GiB at int4** — under the ceiling with
+room. Nothing co-resides: each stage loads, runs, and frees.
+
+**Load path**: DiffSynth, not Diffusers. Neither `WanSpeechToVideoPipeline` nor
+`WanS2VTransformer3DModel` exists in any Diffusers release — [huggingface/diffusers#12257] is still open —
+so that route would mean running a fork of the core library. `diffsynth` is on PyPI, is additive, leaves
+Diffusers stock, and ships `examples/wanvideo/model_inference_low_vram/Wan2.2-S2V-14B.py`: an official
+low-VRAM path using disk offload under an explicit `vram_limit`. That makes the host-RAM exhaustion that
+killed H3 architecturally impossible rather than merely avoided.
+
+**Security posture is unchanged but the vectors differ.** Neither repository declares `auto_map`, so
+`trust_remote_code` stays false. Wan additionally ships its T5 encoder and VAE as `.pth` **pickles**,
+which `auto_map` assertions say nothing about; `torch.load`'s `weights_only=True` default from torch 2.6
+closes that, and the stack gate asserts the default has not regressed.
+
+**Alternatives considered**: LTX-2 is the only joint audio+video pipeline in released Diffusers, and was
+rejected because its `__call__` accepts no speaker reference — it scores a scene but cannot clone a named
+voice. A three-stage split (Wan I2V + TTS + LatentSync) was rejected because lip sync composited after
+generation is weaker than lip sync conditioned into it, and LatentSync is equally a pinned package, so the
+stricter reading buys no purity while costing a model.
+
+[huggingface/diffusers#12257]: https://github.com/huggingface/diffusers/pull/12257
+
+## Voice packaging conflict (open)
+
+**Status**: unresolved; blocks the VOICE half of the stack gate and `requirements.txt`.
+
+`ResembleAI/chatterbox` is the capability choice — 23 languages **including Arabic**, MIT, 2.0 GiB —
+against CosyVoice2's 9 languages with no Arabic. But `chatterbox-tts` 0.1.7 hard-pins `torch==2.6.0`,
+`transformers==5.2.0`, `diffusers==0.29.0`, `gradio==6.8.0`, and sources `resemble-perth` from a git URL.
+Confirmed in the upstream `pyproject.toml`, so it is not a wheel-metadata artifact. Installing it on the
+production host downgrades torch below the cu130 build and `sm_120` support, silently disabling the
+RTX 5080 — the failure `requirements.txt` warns about, arriving through a dependency rather than a
+missing wheel.
+
+Two ways out:
+
+* **Separate virtualenv, subprocess invocation.** Chatterbox is 0.5B and runs once per request for a few
+  seconds of audio, so CPU inference is adequate and the pin conflict becomes irrelevant. Also isolates
+  the TTS slot for later swaps, which serves the multi-model requirement directly.
+* **XTTS-v2 through `coqui-tts`**, which pins nothing against torch (`numpy>=1.26`, `transformers>=4.57`)
+  and declares 17 languages including Arabic — but whose weights are CPML, a **non-commercial** licence.
+
+## Measured constants for the Wan2.2-S2V profile (2026-09-01)
+
+Harvested from the vendor's own configs and low-VRAM example; each still requires confirmation by a real
+generation on the RTX 5080 before T040 writes it into a profile.
+
+| Field | Value | Source |
+|---|---|---|
+| `frame_rate` | 16 fps | low-VRAM example; `save_video_with_audio(fps=16)` |
+| frame-count grid | **4n+1** (81 frames = 5.0 s) | `num_latent_frames = (num_frames-1)//4 + 1`; VAE `temperal_downsample` gives 4x |
+| audio conditioning rate | 16000 Hz | `wav2vec2.../preprocessor_config.json`; `librosa.load(sr=16000)` |
+| low-VRAM resolution | 448x832 | low-VRAM example |
+| denoising steps | 40 | low-VRAM example |
+| audio injection | 12 of 40 layers | `audio_inject_layers` in `config.json` |
+| long-form mechanism | FramePack + multi-clip | `enable_framepack: true`; `Wan2.2-S2V-14B_multi_clips.py` |
+| working set | 42.60 GiB / 15 files | Hugging Face API |
+
+The frame grid is the whole of the residual timebase seam. Because speech is synthesized before video,
+its duration is **measured rather than estimated** — strictly better than both the previous three-model
+design (which estimated from speaking rates) and H3 (which fitted speech into a preset). What remains is
+rounding the measured seconds up to the next legal frame count and padding the audio tail, which is a
+function, not a stage. `duration_range_seconds` is still unmeasured: FramePack removes the hard wall, so
+the ceiling is whatever stays practical on this card.
 
 ## Capability registry for user-provided model links
 
@@ -24,6 +104,9 @@ into shared code was rejected outright: the previous stack encoded 49 frames, 8 
 prompt capacity as global truths, and every one of those had to be unpicked when the model changed.
 
 ## Reference joint audio/video adapter
+
+> **Superseded 2026-09-01.** Retained as the record of what was measured on MiniMax-H3; see
+> **Stack decision superseded** above. Not the current stack.
 
 **Decision**: Use `MiniMaxAI/MiniMax-H3` in its **Ref2VA** (omni-reference) mode as the default reviewed
 video profile, generating video and stereo audio jointly in one invocation. Load it through the official
@@ -58,6 +141,9 @@ considered as longer-duration single-video alternatives but do not generate voic
 so they would have retained the multi-provider architecture.
 
 ## No remote code required — via the root modular layout, not `Ref2VA/`
+
+> **Superseded 2026-09-01.** Retained as the record of what was measured on MiniMax-H3; see
+> **Stack decision superseded** above. Not the current stack.
 
 **Decision**: Load H3 through the repository root's `modular_model_index.json` as a
 `MiniMaxH3ModularPipeline`, selecting the `ref2va` workflow, with `trust_remote_code=False`. Do **not**
@@ -101,6 +187,9 @@ rejected — the root path obtains the same weights with no exception at all. Ve
 into the repository was rejected as a maintenance burden that a supported upstream path makes pointless.
 
 ## Fitting a 33B omni-model into 16 GB VRAM and 64 GB RAM
+
+> **Superseded 2026-09-01.** Retained as the record of what was measured on MiniMax-H3; see
+> **Stack decision superseded** above. Not the current stack.
 
 **Decision**: Run the production profile with a reviewed quantized checkpoint plus layer-wise/sequential
 CPU offload, gate on **both** a 13.5 GiB peak allocator-reserved accelerator ceiling and a configured host
@@ -148,6 +237,9 @@ them from the loaded pipeline rather than restating them. That is the mechanism 
 values out of shared code.
 
 ## Quantization backend: measured, not assumed
+
+> **Superseded 2026-09-01.** Retained as the record of what was measured on MiniMax-H3; see
+> **Stack decision superseded** above. Not the current stack.
 
 **Decision**: Quantize the two large transformers with **optimum-quanto** at int4, resident in host
 RAM, and stream them to the accelerator with sequential CPU offload. Not bitsandbytes.
@@ -238,6 +330,9 @@ rejected because the model card explicitly attributes quality loss to unstructur
 
 ## Local output ceiling of 768p
 
+> **Superseded 2026-09-01.** Retained as the record of what was measured on MiniMax-H3; see
+> **Stack decision superseded** above. Not the current stack.
+
 **Decision**: Treat 768p short side as the maximum local output resolution and place 2K out of scope.
 
 **Rationale**: H3-Regenerate-2K is not open-sourced and is reachable only through the hosted API, which
@@ -273,6 +368,9 @@ the audio. Splitting a long script across several generations and concatenating 
 because it reintroduces multi-generation cost, cross-clip identity drift, and audio seams.
 
 ## Declared checkpoint metadata (measured, not assumed)
+
+> **Superseded 2026-09-01.** Retained as the record of what was measured on MiniMax-H3; see
+> **Stack decision superseded** above. Not the current stack.
 
 **Source**: `spikes/h3_feasibility.py --stage metadata`, run 2026-08-29 on the Windows RTX 5080 host
 (Python 3.11.9, torch 2.13.0+cu130, `diffusers==0.40.0`, `transformers==5.16.1`). Read from

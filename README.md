@@ -24,11 +24,12 @@ Setup, Foundational, and all of User Story 1 except the real adapter (T040).
 Images + voice + prompt → a verified MP4 with a non-silent speech track, a
 published bundle, and a manifest that validates against the contract schema.
 
-The dependency gate passed on `diffusers==0.40.0` / `transformers==5.16.1` — 12/12 on the
-Windows RTX 5080 host, which is where the verdict counts — and
-found that the `Ref2VA/` subfolder **requires remote code** — its VAE configs
-carry `auto_map` and it names classes no Diffusers release exports. The adapter
-will load the repository-root modular pipeline instead.
+The dependency gate was retargeted on 2026-09-01 when MiniMax-H3 was abandoned: one indivisible
+component is 15.5 GiB at int4, over the 13.5 GiB accelerator ceiling, so no offload strategy could
+close the gap. The stack is now **Wan2.2-S2V-14B** for video and lip sync, loaded through DiffSynth
+because neither `WanSpeechToVideoPipeline` nor `WanS2VTransformer3DModel` exists in any Diffusers
+release. The gate's network half passes against the live repositories; its package half awaits an
+install on the production host.
 
 ```bash
 pip install -r requirements-dev.txt && python -m pytest
@@ -38,30 +39,40 @@ pip install -r requirements-dev.txt && python -m pytest
 `requirements.txt` adds the model stack — install the platform torch wheel first. Accelerator and stack tests are opt-in:
 `-m stack_compatibility`, `-m cuda`, `-m mps`, `-m model_download`.
 
-**Next: run `spikes/h3_feasibility.py` on the RTX 5080 host.** The `ref2va` working set is 134 GiB at
-BF16 against a 64 GB host ceiling, so which quantization is actually resident is unmeasured — and T040's
-profile cannot be written honestly until it is. See [spikes/](spikes/README.md).
+**Next: prove the Wan2.2-S2V load on the RTX 5080 host.** The working set is 42.6 GiB at BF16, and
+DiffSynth's low-VRAM path offloads to disk under an explicit `vram_limit`, so host RAM is no longer the
+binding constraint — but nothing is measured until it runs. T040's profile cannot be written honestly
+until it does. See [spikes/](spikes/README.md).
 
 ## Model
 
-Default profile: [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3), `ref2va`
-workflow. One model generates video, cloned voice, and lip sync jointly — no separate TTS or lip-sync
-stage.
+Three roles — video, voice cloning, lip sync — covered by **two models behind one adapter**.
+`JointAdapter` describes the interface, not the model, so composing two models inside a single
+`generate()` needs no protocol change.
 
-Loaded from the repository **root** (`modular_model_index.json`) as a `MiniMaxH3ModularPipeline`, not
-from the `Ref2VA/` subfolder — the subfolder's VAE configs declare `auto_map` remote code, which this
-project prohibits.
+| Role | Model | Notes |
+|---|---|---|
+| VIDEO + LIP_SYNC | [`Wan-AI/Wan2.2-S2V-14B`](https://huggingface.co/Wan-AI/Wan2.2-S2V-14B) | audio conditions the denoiser at 12 of 40 layers, so lip sync is native rather than a post-pass |
+| VOICE | **unresolved** — see below | Chatterbox is chosen but cannot yet be installed |
+
+The voice slot is blocked on packaging, not on capability. `chatterbox-tts` hard-pins `torch==2.6.0`,
+which on the production host removes the cu130 build and `sm_120` support. The options are a separate
+virtualenv invoked as a subprocess, or XTTS-v2 via `coqui-tts` under a non-commercial licence. See
+`requirements.txt` and research.md.
 
 | | |
 |---|---|
-| Duration | read from `pipeline.min_duration` / `max_duration`; ceiling measured, not assumed |
-| Output | 768p short side, 24 FPS, 32 kHz stereo |
-| Languages | 11 |
+| Frame rate | 16 fps |
+| Frame count | must be 4n+1 — 81 frames is 5.0 s |
+| Duration | multi-clip; ceiling measured, not assumed |
+| Audio | conditioning resampled to 16 kHz; delivery keeps the TTS rate |
 | References | 1 image + 1 audio timbre anchor. Video references rejected. |
 
-Some H3 components are closed-source — see [closed-models.md](specs/001-generate-image-video/closed-models.md).
+Neither repository declares `auto_map`, so `trust_remote_code` stays false. Wan ships its T5 encoder
+and VAE as `.pth` pickles, which is a separate execution vector — closed by `torch.load`'s
+`weights_only=True` default and asserted by the stack gate.
 
-Other models can be added later as reviewed profiles via Hugging Face URL.
+Other models can be added later as reviewed profiles.
 
 ## Hardware
 
@@ -73,17 +84,18 @@ Other models can be added later as reviewed profiles via Hugging Face URL.
 | OS | Windows 11 (production), macOS 13+ (control-path dev) |
 | Stack | Python 3.11, PyTorch 2.13, CUDA 13.0, driver 580.88+ |
 
-Intended to run under quantized layer-wise CPU offload — **not yet demonstrated on this hardware**;
-that is what the feasibility spike measures. **Inference time is unbounded — a run may take hours.**
-No SLA, no timeout.
+Intended to run under DiffSynth's disk-offload path with an explicit `vram_limit` — **not yet
+demonstrated on this hardware**; that is what the feasibility spike measures. **Inference time is
+unbounded — a run may take hours.** No SLA, no timeout.
 
 ## Key rules
 
 - Reference audio is a **timbre anchor only**. Never played back. Must say *different words* than the script.
 - Per-request voice-cloning consent, bound to request ID + audio hash, reset on every audio change.
 - Speech is never trimmed or truncated, and **no request is rejected for script length**.
-  Duration is an input to joint generation, not a measurement of it: you get a suggested
-  duration from your script, and you can override it anywhere in the model's range.
+  Duration is an input, not a measurement: you get a suggested duration from your script, and you
+  can override it anywhere in the model's range. Speech is synthesized before video, so the effective
+  duration is rounded up to the next legal frame count (4n+1) and the audio tail padded to match.
 - Successful outputs are retained in `outputs/<request-id>/` as **unencrypted** files until you delete them.
 - No remote code. No license handling — model license compliance is entirely yours.
 

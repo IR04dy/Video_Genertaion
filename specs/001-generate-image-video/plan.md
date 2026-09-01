@@ -11,12 +11,20 @@ speech script, a reference-voice recording, a language, and a per-request voice-
 and returns a browser-playable MP4 whose speech is cloned from the reference voice with natively
 synchronized mouth movement.
 
-The default reviewed video profile is `MiniMaxAI/MiniMax-H3` in its Ref2VA (omni-reference) mode, which
-generates video and stereo audio jointly in one invocation. There is no separate text-to-speech stage,
-no separate lip-synchronization stage, no cross-provider timebase bridge, and no post-generation face
-preflight, because a single model produces mouth movement and voice together. The adapter registry and
-Hugging Face URL selection are unchanged: H3 is the default reviewed profile, not the only one, and
-further profiles are added later under the same review rules.
+> **Retargeted 2026-09-01.** `MiniMaxAI/MiniMax-H3` was abandoned: its largest indivisible component is
+> 15.5 GiB at int4, over the 13.5 GiB accelerator ceiling, so no offload strategy could make it run here.
+> Sections describing H3 specifics are superseded — see `research.md` → "Stack decision superseded".
+
+The default reviewed profile covers three roles with **two models behind one adapter**:
+`Wan-AI/Wan2.2-S2V-14B` for video and lip sync, and a TTS for voice. Because audio conditions the Wan
+denoiser directly, mouth movement is a property of generation rather than a separate pass — so there is
+still no separate lip-synchronization stage, no cross-provider timebase bridge, and no post-generation
+face preflight.
+
+Speech is synthesized first, inside the same `generate()` call, which means its duration is **measured
+rather than estimated**. `JointAdapter` describes the *interface*, not the model, so composing two models
+behind one invocation needs no protocol change. The adapter registry and Hugging Face URL selection are
+unchanged: this is the default reviewed profile, not the only one.
 
 Each request is exactly one generation at a duration the adapter profile declares as supported. Output
 duration is therefore bounded by the profile, while inference time is explicitly unbounded: layer-wise
@@ -31,17 +39,20 @@ external filesystem actions. The application neither inspects nor records model-
 **Language/Version**: Python 3.11 (`>=3.11,<3.13`)
 
 **Primary Dependencies**: PyTorch 2.13.x with the official Windows CUDA 13.0 wheel (floor: torch 2.5 —
-Transformers 5.x disables its model classes below it); `diffusers==0.40.0`, providing
-`MiniMaxH3ModularPipeline`, `MiniMaxH3Blocks`, `MiniMaxH3Transformer3DModel`, `AutoencoderKLMiniMaxH3`,
-`AutoencoderKLMiniMaxH3Audio`, and `MiniMaxH3Scheduler`; `transformers==5.16.1`, providing
-`Qwen3VLForConditionalGeneration`, `Qwen3VLProcessor`, and `Qwen2TokenizerFast`;
+Transformers 5.x disables its model classes below 2.5, and 2.6 is where `torch.load` defaults to
+`weights_only=True`, which is the gate on Wan's `.pth` pickles); `diffsynth==2.1.5`, providing
+`WanVideoPipeline`, `ModelConfig`, and the `wan_video_dit_s2v` denoiser — Diffusers is **not** the load
+path, because neither `WanSpeechToVideoPipeline` nor `WanS2VTransformer3DModel` exists in any Diffusers
+release; `transformers==5.16.1`, providing the Wav2Vec2 audio encoder and processor;
 Accelerate for layer-wise/sequential offload; a reviewed quantization backend; Hugging Face Hub,
 Safetensors, Gradio, Pillow, NumPy, SoundFile/librosa, imageio, imageio-ffmpeg, Pydantic 2.x, psutil, and
 filelock. The Qwen3-TTS dependency set and the separately locked LatentSync worker stack are removed
 along with their stages, which eliminates the previous cross-provider dependency conflict and the local
-worker-process boundary. The blocking stack-compatibility gate has **run and passed** against these pins;
-see `tests/integration/test_stack_compatibility.py`. It also established that the loading path is the
-repository **root** `modular_model_index.json`, not the `Ref2VA/` subfolder — see below.
+worker-process boundary. The blocking stack-compatibility gate was **rewritten for this stack**; its
+network assertions pass and its package assertions await an install on the production host. See
+`tests/integration/test_stack_compatibility.py`. The **voice** dependency is deliberately unpinned:
+`chatterbox-tts` hard-pins `torch==2.6.0`, which would remove the cu130 build and disable the RTX 5080 —
+see `research.md` → "Voice packaging conflict".
 
 **Storage**: Fixed project `outputs/` for complete successful request bundles and read-only history;
 fixed project `.model-cache/` for application-owned model snapshots/inventory, separate from the global
@@ -105,15 +116,15 @@ constitutional exceptions are required.
 
 The post-design gate approves the architecture, not unmeasured hardware claims. The following remain
 mandatory release measurements rather than assumptions: that the pinned Diffusers/Transformers releases
-export the H3 classes with `trust_remote_code=False`; the resident host footprint per precision against
+export the model-stack classes with `trust_remote_code=False`; the resident host footprint per precision against
 64 GB; peak allocator-reserved accelerator memory against 13.5 GiB; and **the real supported duration
 ceiling on this card, which is measured rather than assumed to be the card's stated 15 seconds**. A failed
 clean-install, class-availability, offline, duration, or dual-ceiling test leaves the profile
 `incompatible` and blocks the production release rather than weakening a constraint.
 
 Three design facts are recorded here because they carry quality risk the gate does not cover.
-H3-Context-IR is not open-sourced, so prompt structuring is built locally from the published Prompting
-Guidance. H3-Regenerate-2K is not open-sourced, so 768p short side is the local output ceiling. And
+No hosted prompt-structuring service is called, so prompt structuring is built locally. The output
+resolution ceiling is a measured profile field rather than a vendor claim. And
 because audio and video are generated jointly, whether a script actually fits the requested duration is
 unknowable before generation: the system offers a speaking-rate-derived suggestion and records its
 provenance, but delivery quality is judged by the operator after the fact, exactly as lip-sync quality
@@ -162,10 +173,10 @@ storage.py                           # Fixed roots, atomic manifests, disk estim
 adapters/
 ├── __init__.py
 ├── base.py                          # Joint audio/video adapter protocol and capability profile
-├── minimax_h3.py                    # Default reviewed profile (root modular, ref2va workflow)
+├── wan_s2v.py                       # Default reviewed profile (TTS then Wan2.2-S2V, one generate())
 └── stub.py
 spikes/                              # Throwaway hardware probes; NOT product code
-└── h3_feasibility.py                # Loads real weights, measures both ceilings
+└── wan_s2v_feasibility.py           # Loads real weights, measures both ceilings
 requirements-core.txt
 requirements.txt
 requirements-dev.txt
@@ -175,7 +186,7 @@ ruff.toml
 .env.example                        # Non-secret runtime options; no bundle-root override
 outputs/.gitkeep                     # Successful bundles ignored except placeholder
 tests/
-├── conftest.py                      # Fakes, fixtures, and a fixture profile with non-H3 values
+├── conftest.py                      # Fakes, fixtures, and a fixture profile with non-production values
 ├── contract/
 │   ├── test_generation_service.py
 │   ├── test_model_catalog_service.py
@@ -186,7 +197,7 @@ tests/
 │   ├── test_history_reconciliation.py
 │   ├── test_inventory_restart.py
 │   ├── test_model_download.py
-│   ├── test_stack_compatibility.py  # Blocking: H3 classes load with trust_remote_code=False
+│   ├── test_stack_compatibility.py  # Blocking: stack loads with trust_remote_code=False, no pickles
 │   ├── test_long_runtime.py         # Progress + cancellation under offload; no latency assertion
 │   ├── test_cuda_smoke.py
 │   └── test_mps_smoke.py
@@ -227,7 +238,7 @@ and their tests are gone, along with `adapters/cogvideox.py`, `adapters/qwen3_tt
 `adapters/latentsync.py`, and `adapters/native.py`. The cross-provider dependency conflict that forced
 process isolation no longer exists, because there is no second heavyweight provider.
 
-`prompting.py` is new and load-bearing: H3-Context-IR is not open-sourced, so assembling the dialogue-tag
+`prompting.py` is new and load-bearing: no hosted structuring service is called, so assembling the dialogue-tag
 prompt, measuring it against the profile's token capacity, and recording truncation overrides is this
 application's responsibility. `model_registry.py` holds every model-specific number as a measured profile
 field, and `test_profile_agnostic.py` exists to fail if any of those values leak back into shared code.
@@ -241,13 +252,16 @@ truths; that mistake is not repeated.
 
 | Adapter key | Reference model | Validated roles | Runtime | Key profile fields |
 |-------------|-----------------|-----------------|---------|--------------------|
-| `minimax-h3` | `MiniMaxAI/MiniMax-H3` (root modular pipeline, `ref2va` workflow) | video + native voice + native lip sync | CUDA BF16 with layer-wise/sequential offload and a reviewed quantized checkpoint | Duration 4-15 s (**target 6-10 s; the 15 s ceiling is measured on this card, never assumed**); 24 FPS; 768p short side; 32 kHz stereo; 11 stable dialogue languages; Ref2VA references `<= 9` images, `<= 3` audio clips of 2-15 s each, `<= 12` files total; prompt/token capacity measured; video references rejected |
+| `wan-s2v` | `Wan-AI/Wan2.2-S2V-14B` via DiffSynth, plus a TTS for voice | video + native lip sync; voice supplied by the second model (`native_capabilities={VIDEO,LIP_SYNC}`) | CUDA BF16 under DiffSynth's disk-offload path with an explicit `vram_limit`; each stage loaded and freed, nothing co-resident | 16 FPS; frame count must be **4n+1**; duration ceiling **unmeasured** (FramePack plus multi-clip removes the hard wall); audio conditioning at 16 kHz with delivery at the TTS rate; dialogue languages from the TTS; prompt/token capacity measured; video references rejected |
 | `stub` | Local fixtures | all roles | CPU | No network/weights; deterministic control-path tests |
 
 Additional reviewed profiles are added later through the unchanged adapter registry and Hugging Face URL
-selection. H3 is the default, not the only permitted model.
+selection. This is the default, not the only permitted model.
 
 ### H3 facts that shape the design
+
+> **Superseded 2026-09-01.** Retained as the record of what was established about MiniMax-H3 before it
+> was abandoned. Not the current stack; see `research.md` → "Stack decision superseded".
 
 - **Two task-specific checkpoints** exist (`FL2VA/`, `Ref2VA/`). Only the `ref2va` workflow is used,
   because it is the mode accepting an image reference plus an audio reference.
@@ -443,8 +457,7 @@ has changed.
 
 1. **Blocking stack-compatibility gate, before architecture locks.** Confirm the pinned Diffusers and
    Transformers releases export every class named by the root `modular_model_index.json` —
-   `MiniMaxH3ModularPipeline`, `MiniMaxH3Blocks`, `MiniMaxH3Transformer3DModel`, `AutoencoderKLMiniMaxH3`,
-   `AutoencoderKLMiniMaxH3Audio`, `MiniMaxH3Scheduler`, `Qwen3VLForConditionalGeneration`,
+   `WanVideoPipeline`, `ModelConfig`, `wan_video_dit_s2v`, the Wav2Vec2 encoder and processor,
    `Qwen3VLProcessor`, and `Qwen2TokenizerFast` — with `trust_remote_code=False`, and that no root
    component config declares an `auto_map`. If either fails, the profile stays `incompatible`; remote code
    is never enabled as a workaround. **Status: passed** against `diffusers==0.40.0` /
@@ -475,7 +488,7 @@ has changed.
    resolution, sample rate, languages, reference limits, and token capacity are read from the profile
    under test. A fixture profile with deliberately different values must pass the same suite, which is the
    regression guard against re-baking one model's constants into the architecture.
-7. CUDA acceptance runs one joint H3 `ref2va`-workflow generation end to end, measures the real supported duration
+7. CUDA acceptance runs one composite generation (speech then video) end to end, measures the real supported duration
    ceiling on this card rather than assuming 15 s, gates peak allocator-reserved accelerator memory at
    13.5 GiB and resident host memory at the configured ceiling, records allocated/reserved/free and host
    RSS, preserves the disk reserve, and verifies final and retained artifacts. Windows release also
@@ -499,7 +512,7 @@ See [tasks.md](tasks.md) for the task-level state.
 
 
 1. **Dependency/architecture gate**: verify published wheels, resolve and install the exact environment,
-   prove the H3 classes load with `trust_remote_code=False`, measure resident footprint per precision
+   prove the model-stack classes load with `trust_remote_code=False`, measure resident footprint per precision
    against both ceilings, then freeze contracts. Follow with failing foundation tests, domain/errors/
    settings, fixed roots, reserve, manifests, and service protocols.
 2. **Model catalog**: URL inspection, immutable download, inventory, manual update-as-new-revision, leases,
@@ -514,7 +527,7 @@ See [tasks.md](tasks.md) for the task-level state.
 5. **Device/memory/disk**: capability resolution, CUDA/MPS/CPU safety, layer-wise and sequential offload,
    reviewed quantization, dual-ceiling gating, allocated/reserved/free and host-RSS metrics, two-stage disk
    preflight with mid-write monitoring, OOM and disk recovery.
-6. **Production adapter**: the `minimax-h3` profile with measured duration/FPS/resolution/sample-rate/
+6. **Production adapter**: the `wan-s2v` profile with measured duration/FPS/resolution/sample-rate/
    language/reference/token fields, locally built prompt structuring per the published Prompting Guidance,
    immutable fingerprints, and the profile-driven test suite that keeps those values out of the architecture.
 7. **Hardening/platform acceptance**: malicious paths/repos, secrets, interruption and cancellation of a
@@ -537,7 +550,7 @@ Two deliberate tensions are recorded rather than waived:
 - **Unbounded inference time** versus the constitution's bounded-inference principle. The constitution
   requires bounded *allocation* and reproducible parameters, both of which the dual-ceiling gates and the
   recorded effective profile preserve. Wall-clock time is explicitly out of scope, by product decision.
-- **Locally built prompt structuring** replacing the unavailable H3-Context-IR. The model card attributes
+- **Locally built prompt structuring** replacing any hosted structuring service. The model card attributes
   meaningful output quality to that module, and it is not open-sourced. This is an accepted quality risk
   with a measurable owner: the assembled prompt is retained per request so results stay explainable and
   the structuring can be improved without changing the contract.

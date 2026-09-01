@@ -1,6 +1,11 @@
 # Closed Components: MiniMax-H3
 
-Parts of the H3 system withheld from the open-source release, and what each costs us.
+> **Superseded 2026-09-01.** MiniMax-H3 was abandoned for fitting reasons — see `research.md` →
+> "Stack decision superseded". This document is retained as the record of what was reviewed. It no
+> longer constrains the design: the replacement stack (`Wan-AI/Wan2.2-S2V-14B`, Apache-2.0) is fully
+> open, has no hosted-service dependency, and imposes no closed-component output ceiling.
+
+Parts of the H3 system withheld from the open-source release, and what each cost us.
 
 Source: [model card](https://huggingface.co/MiniMaxAI/MiniMax-H3), reviewed 2026-08-27.
 

@@ -18,22 +18,44 @@
 # step 4 fails with `No module named pytest`.
 #
 # Required floor, enforced by the installed libraries rather than by this file:
-#   torch >= 2.5   (transformers 5.x refuses to enable PyTorch below this;
-#                   diffusers 0.40 references torch.xpu, absent before 2.4)
+#   torch >= 2.6   (transformers 5.x refuses to enable PyTorch below 2.5; 2.6 is
+#                   where torch.load defaults to weights_only=True, which is the
+#                   gate on Wan's .pth pickles — see the stack compatibility test)
 #
 # Versions below were resolved by T008 against tests/integration/test_stack_compatibility.py.
-# Every MiniMax-H3 component class named by the repository's modular_model_index.json
-# is exported by these releases, so the checkpoint loads with trust_remote_code=False.
+#
+# The video stack loads through DiffSynth, not Diffusers. Neither
+# WanSpeechToVideoPipeline nor WanS2VTransformer3DModel exists in any Diffusers
+# release (huggingface/diffusers#12257 is still open), so that route would mean
+# running a fork of the core library. DiffSynth ships both from a versioned
+# package, leaving Diffusers stock.
 
 -r requirements-core.txt
 
-# --- Model stack (pinned by the T008 dependency gate) ---
-diffusers==0.40.0          # MiniMaxH3ModularPipeline, MiniMaxH3Blocks,
-                           # MiniMaxH3Transformer3DModel, MiniMaxH3Scheduler,
-                           # AutoencoderKLMiniMaxH3, AutoencoderKLMiniMaxH3Audio
-transformers==5.16.1       # Qwen3VLForConditionalGeneration, Qwen3VLProcessor,
-                           # Qwen2TokenizerFast
+# --- Video stack: VIDEO + LIP_SYNC (pinned by the T008 dependency gate) ---
+# Wan2.2-S2V-14B. Audio conditions the denoiser directly, so lip sync is a
+# property of generation rather than a separate pass.
+diffsynth==2.1.5           # WanVideoPipeline, ModelConfig, wan_video_dit_s2v
+transformers==5.16.1       # Wav2Vec2 audio encoder and processor
 accelerate>=1.0            # layer-wise / sequential CPU offload
+modelscope>=1.18           # DiffSynth's weight resolver
+einops>=0.8                # required by the DiffSynth model definitions
+
+# --- Voice: VOICE role — UNRESOLVED, deliberately not pinned here ---
+# The chosen model is ResembleAI/chatterbox (23 languages including Arabic, MIT).
+# It CANNOT be installed into this environment: chatterbox-tts 0.1.7 hard-pins
+# torch==2.6.0, transformers==5.2.0, diffusers==0.29.0 and gradio==6.8.0. On the
+# production host that downgrade removes the cu130 build and sm_120 support, so
+# pip would silently disable the RTX 5080 — the exact failure this file's header
+# warns about, arriving through a dependency instead of a missing wheel.
+#
+# Two ways out, neither yet chosen (see research.md, "Voice packaging conflict"):
+#   * run Chatterbox in its own virtualenv and invoke it as a subprocess, which
+#     also isolates the TTS slot for later swaps;
+#   * use XTTS-v2 through coqui-tts, which pins nothing against torch but whose
+#     weights are CPML (non-commercial).
+# Until that is settled the voice half of the stack gate skips rather than fails.
+
 # Reviewed quantization backend. CUDA hosts only: it publishes no wheel for
 # Intel macOS, and without the marker this file is unsatisfiable there — which
 # would make the control-path dev environment impossible to create.

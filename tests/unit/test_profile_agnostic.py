@@ -1,7 +1,7 @@
 """T034: the leak detector.
 
 Every assertion here runs the SAME code against a fixture profile whose measured
-values are all different from the stub's and from MiniMax-H3's. A model-specific
+values are all different from the stub's and from the production profile's. A model-specific
 number that has leaked into shared code fails here and nowhere else, which is the
 entire reason this file exists.
 """

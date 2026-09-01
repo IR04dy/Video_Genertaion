@@ -1,15 +1,20 @@
 """Reference staging, consent, and the duration decision (T036, T038).
 
-The duration logic here is the part worth reading carefully. Because H3 generates
-audio and video **jointly**, there is no separate speech synthesis stage whose
-output could be measured before video is produced. Duration is therefore an
-**input** to generation, not a measurement of it.
+The duration logic here is the part worth reading carefully. Duration is an
+**input** to generation, not a measurement of it. Speech synthesis happens inside
+the adapter, behind one `generate()` call, so nothing at this layer has a
+synthesized waveform to measure — and by the time one exists the decision has
+already been made.
 
-That has a consequence the earlier three-model design did not have: there is no
-pre-generation fit check, and **no request is ever rejected for script length**.
-A long script yields a suggestion clamped to what the model supports; if delivery
-sounds rushed, the operator raises the duration and regenerates. The only
-`duration` error is an operator override outside the profile's supported range.
+Consequently there is no pre-generation fit check, and **no request is ever
+rejected for script length**. A long script yields a suggestion clamped to what
+the model supports; if delivery sounds rushed, the operator raises the duration
+and regenerates. The only `duration` error is an operator override outside the
+profile's supported range.
+
+The adapter may round the effective duration up to the nearest frame count its
+denoiser accepts and pad the audio tail to match. That is a model constraint and
+belongs there, not here: this module never learns the grid.
 """
 
 from __future__ import annotations
