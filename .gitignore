@@ -19,6 +19,17 @@ htmlcov/
 outputs/*
 !outputs/.gitkeep
 
+# Spike artifacts. Disposable probes write here; their conclusions belong in
+# research.md, not in the repository as loose files.
+spike-report*.json
+spike-out/
+spike-*.log
+
+# DiffSynth resolves its `local_model_path` to ./models and downloads there at
+# load time unless every component is pinned. Ignored so an accidental hidden
+# download is never committed -- see research.md, "A hidden network download".
+models/
+
 # Configuration
 .env
 

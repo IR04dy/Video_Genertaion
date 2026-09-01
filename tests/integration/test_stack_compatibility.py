@@ -57,7 +57,7 @@ requires_model_stack = pytest.mark.skipif(
 )
 
 requires_voice_stack = pytest.mark.skipif(
-    not _installed("chatterbox"),
+    not _installed("TTS"),
     reason="voice stack not installed; run: pip install -r requirements.txt",
 )
 
@@ -81,7 +81,7 @@ requires_torch_floor = pytest.mark.skipif(
 )
 
 VIDEO_REPO_ID = "Wan-AI/Wan2.2-S2V-14B"
-VOICE_REPO_ID = "ResembleAI/chatterbox"
+VOICE_REPO_ID = "coqui/XTTS-v2"
 
 # Component configs on the video repository's loading path. The T5 encoder and
 # VAE ship as bare .pth with no config of their own, so they are covered by the
@@ -146,21 +146,79 @@ def test_diffsynth_ships_the_s2v_denoiser() -> None:
 
 
 @requires_voice_stack
-def test_chatterbox_is_the_tts_package_not_the_irc_stub() -> None:
-    """Guard against the dependency-confusion name on PyPI.
+def test_coqui_ships_the_xtts_model() -> None:
+    """The installed package must be the Coqui fork that still carries XTTS.
 
-    ``chatterbox`` on PyPI is an unrelated 0.0.0 IRC bot framework. The package
-    this project needs is ``chatterbox-tts``, which installs the same top-level
-    module name. Asserting on module contents rather than on the distribution
-    name is what makes this catch a wrong-package install.
+    ``coqui-tts`` is the maintained continuation of the discontinued ``TTS``
+    distribution and installs under the same top-level module name. Asserting on
+    module contents rather than on the distribution name is what makes this catch
+    an install of the original abandoned package, whose XTTS predates the Arabic
+    tokenizer rules this profile depends on.
     """
-    module = importlib.import_module("chatterbox.tts")
+    module = importlib.import_module("TTS.tts.models.xtts")
 
-    assert hasattr(module, "ChatterboxTTS"), (
-        "the installed 'chatterbox' module has no ChatterboxTTS. The IRC bot "
-        "stub was almost certainly installed instead; the correct requirement "
-        "is 'chatterbox-tts'."
+    assert hasattr(module, "Xtts"), (
+        "the installed 'TTS' module exposes no Xtts model. The abandoned "
+        "'TTS' distribution was probably installed; the correct requirement "
+        "is 'coqui-tts'."
     )
+
+
+@requires_voice_stack
+def test_xtts_declares_arabic() -> None:
+    """Arabic is a hard product requirement, so it is asserted, not assumed.
+
+    This is what ruled CosyVoice2 out. Asserting it here means a future voice
+    model that quietly drops Arabic fails the gate rather than the first Arabic
+    generation.
+    """
+    module = importlib.import_module("TTS.tts.layers.xtts.tokenizer")
+    tokenizer = module.VoiceBpeTokenizer()
+
+    assert "ar" in tokenizer.char_limits, (
+        "the installed XTTS tokenizer declares no Arabic character limit. "
+        "Arabic is a hard requirement for this profile; do not pin this release."
+    )
+
+    # Asserted, not merely read: T040 must sentence-split Arabic scripts at this
+    # boundary, and a release that changes it silently changes that behaviour.
+    assert tokenizer.char_limits["ar"] == 166, (
+        f"the Arabic character limit is {tokenizer.char_limits['ar']}, not the 166 "
+        "this profile's script-splitting was measured against. Re-measure before pinning."
+    )
+
+
+@requires_voice_stack
+@requires_torch_floor
+def test_xtts_inference_path_unpickles_safely() -> None:
+    """The voice half ships pickles too, so it needs its own unpickling verdict.
+
+    ``coqui/XTTS-v2`` is four ``.pth`` files. The video gate's ``torch.load``
+    default assertion does not cover them, because the loader here is Coqui's
+    own code rather than Transformers'. Coqui passes ``weights_only`` explicitly
+    on the XTTS inference path; this asserts that it still does.
+
+    Scope is deliberately narrow. Nine ``torch.load`` calls elsewhere in the
+    package -- in Bark, Tortoise, neuralhmm, overflow and the XTTS *trainer* --
+    pass no ``weights_only`` at all. None is on this application's loading path,
+    and none may be brought onto it without re-running this review.
+    """
+    import inspect
+
+    xtts = importlib.import_module("TTS.tts.models.xtts")
+    manager = importlib.import_module("TTS.tts.layers.xtts.xtts_manager")
+
+    for module in (xtts, manager):
+        source = inspect.getsource(module)
+        for line_no, line in enumerate(source.splitlines(), start=1):
+            if "torch.load(" not in line:
+                continue
+            window = " ".join(source.splitlines()[line_no - 1 : line_no + 4])
+            assert "weights_only" in window, (
+                f"{module.__name__}:{line_no} calls torch.load without "
+                "weights_only on the XTTS inference path. This release "
+                "re-opens the pickle vector; do not pin it."
+            )
 
 
 # --------------------------------------------------------------------------
@@ -203,8 +261,10 @@ def test_video_repo_ships_no_loadable_python() -> None:
 def test_voice_repo_ships_only_weights() -> None:
     """The voice repository must carry no Python at all.
 
-    Chatterbox loads through its own installed package, so the repository is
-    pure weights and has no legitimate reason to ship code.
+    XTTS loads through the installed ``coqui-tts`` package, so the repository is
+    weights, a config and a vocabulary -- and has no legitimate reason to ship
+    code. Its four ``.pth`` files are pickles, which is why
+    ``test_xtts_inference_path_unpickles_safely`` exists alongside this.
     """
     python_files = sorted(f for f in _list_files(VOICE_REPO_ID) if f.endswith(".py"))
 

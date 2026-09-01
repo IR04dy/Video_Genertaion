@@ -4,6 +4,27 @@ All technical unknowns from the clarified specification are resolved below. Link
 project or vendor documentation reviewed on 2026-08-27, except where a later measurement supersedes
 them — see **Stack decision superseded** immediately below.
 
+## Standing project constraint (stated 2026-09-01)
+
+**Open-weight models and open-source tools only. Nothing is bought. Not for commercial use.**
+
+This is the constraint several decisions in this document already rest on, and it is recorded here
+because the architecture cannot express it: `ModelProfile` carries no licence field by design, and a
+test enforces that absence. Licence obligations therefore live as prose here and in
+`requirements.txt`, never in code.
+
+What it settles:
+
+* **CPML is acceptable.** `coqui/XTTS-v2`'s weights forbid commercial use and nothing else, so they
+  are usable here. Chatterbox was rejected on **packaging** grounds, not licence grounds — the two
+  reasons are independent and should not be conflated if either is revisited.
+* **No paid or hosted inference.** No commercial APIs, no rented accelerators. Every model runs
+  locally on the one RTX 5080, which is also why the 13.5 GiB reserved ceiling is a hard constraint
+  rather than a tuning preference.
+* **If this ever goes commercial**, the XTTS-v2 weights must be replaced before release. That
+  tripwire is written into `requirements.txt` beside the pin itself.
+
+
 ## Stack decision superseded (2026-09-01)
 
 **Decision**: Abandon `MiniMaxAI/MiniMax-H3`. Cover the three roles with **two models behind one
@@ -40,25 +61,226 @@ stricter reading buys no purity while costing a model.
 
 [huggingface/diffusers#12257]: https://github.com/huggingface/diffusers/pull/12257
 
-## Voice packaging conflict (open)
+## Voice packaging conflict (resolved 2026-09-01)
 
-**Status**: unresolved; blocks the VOICE half of the stack gate and `requirements.txt`.
+**Status**: resolved. `coqui-tts==0.27.5` (XTTS-v2) is pinned; the VOICE half of the stack gate is live.
 
-`ResembleAI/chatterbox` is the capability choice — 23 languages **including Arabic**, MIT, 2.0 GiB —
-against CosyVoice2's 9 languages with no Arabic. But `chatterbox-tts` 0.1.7 hard-pins `torch==2.6.0`,
-`transformers==5.2.0`, `diffusers==0.29.0`, `gradio==6.8.0`, and sources `resemble-perth` from a git URL.
-Confirmed in the upstream `pyproject.toml`, so it is not a wheel-metadata artifact. Installing it on the
-production host downgrades torch below the cu130 build and `sm_120` support, silently disabling the
-RTX 5080 — the failure `requirements.txt` warns about, arriving through a dependency rather than a
-missing wheel.
+**Requirement that drove it**: Arabic. This is a hard product requirement, not a preference, which is
+what rules out CosyVoice2-0.5B (9 languages, no Arabic) despite its Apache-2.0 licence and clean
+packaging.
 
-Two ways out:
+**Rejected: `ResembleAI/chatterbox`.** The capability fits — 23 languages including Arabic, MIT, 2.0 GiB
+— but `chatterbox-tts` 0.1.7 hard-pins `torch==2.6.0`, `transformers==5.2.0`, `diffusers==0.29.0` and
+`gradio==6.8.0`, and sources `resemble-perth` from a git URL. Confirmed in the upstream `pyproject.toml`,
+so not a wheel-metadata artifact. Installing it on the production host downgrades torch below the cu130
+build and `sm_120` support, silently disabling the RTX 5080 — the failure `requirements.txt` warns
+about, arriving through a dependency rather than a missing wheel.
 
-* **Separate virtualenv, subprocess invocation.** Chatterbox is 0.5B and runs once per request for a few
-  seconds of audio, so CPU inference is adequate and the pin conflict becomes irrelevant. Also isolates
-  the TTS slot for later swaps, which serves the multi-model requirement directly.
-* **XTTS-v2 through `coqui-tts`**, which pins nothing against torch (`numpy>=1.26`, `transformers>=4.57`)
-  and declares 17 languages including Arabic — but whose weights are CPML, a **non-commercial** licence.
+**Chosen: XTTS-v2 through `coqui-tts`.** Verified against the sdist's own `pyproject.toml`, not against
+published summaries:
+
+| Property | Finding | Consequence |
+|---|---|---|
+| torch | **absent from core deps**; `torch>=2.2` appears only in the `cpu`/`cuda` extras | a bare install touches torch zero times |
+| torchaudio | same, `>=2.2.0`, extras only | `2.11.0+cu130` already installed, untouched |
+| transformers | `>=4.57`, a floor | satisfied by the `==5.16.1` Wan pins; the two halves do not contend |
+| `[tool.uv.sources]` cu128 index | uv-only | pip ignores it entirely |
+| librosa | `>=0.11.0` | raised this project's floor from `>=0.10` |
+| python | `>=3.10,<3.15` | 3.11 sits inside |
+| Arabic | dedicated abbreviation, symbol, ordinal (`([0-9]+)(ون|ين|ث|ر|ى)`) and punctuation rules, plus an Arabic normalization test case | first-class, not incidental to a multilingual checkpoint |
+
+The extras structure is the whole reason this works, and it is fragile against a well-meaning edit:
+`coqui-tts[cuda]` would resolve torch from Coqui's own cu128 index and strip `sm_120`. `requirements.txt`
+records the omission as deliberate for that reason.
+
+**Two licences, not one.** Earlier notes conflated them. The `coqui-tts` **package** is MPL-2.0 and
+imposes nothing here. The `coqui/XTTS-v2` **weights** are CPML, which forbids **commercial** use. This
+project is non-commercial, so CPML is satisfied today; `requirements.txt` carries it as a tripwire, and
+the recorded exit if that changes is Chatterbox in a separate virtualenv invoked as a subprocess.
+
+**Unpickling, voice half.** `coqui/XTTS-v2` ships no Python, but four `.pth` pickles (`model.pth`,
+`dvae.pth`, `mel_stats.pth`, `speakers_xtts.pth`). The video gate's `torch.load` default assertion does
+not cover them, because Coqui loads them with its own code. Coqui passes `weights_only=True` explicitly
+on the XTTS inference path (guarded by `is_pytorch_at_least_2_4()`), and `test_xtts_inference_path_
+unpickles_safely` asserts it still does. Scope is narrow on purpose: nine `torch.load` calls elsewhere in
+the package — Bark, Tortoise, neuralhmm, overflow, and the XTTS *trainer* — pass no `weights_only` at
+all. None is on this application's loading path, and none may be brought onto it without re-running this
+review.
+
+## The transformers ceiling (measured on the RTX 5080 host, 2026-09-01)
+
+**Status**: resolved, and it changes a pin T008 had already recorded as settled.
+
+Installing the resolved stack on the production host falsified one of its assumptions. `coqui-tts`
+declares `transformers>=4.57` with **no upper bound**, and that floor was read as compatibility with the
+`==5.16.1` the video half had pinned. It is not:
+
+```
+TTS/tts/models/xtts.py -> TTS/tts/layers/xtts/gpt.py -> TTS/tts/layers/tortoise/autoregressive.py
+  from transformers.pytorch_utils import isin_mps_friendly   # removed in transformers 5.0
+```
+
+The import is on the XTTS **inference** path, reached through the GPT layer, so it cannot be dodged by
+not using Tortoise. The unbounded upstream floor is a packaging bug: the resolver installs a 5.x that
+cannot import.
+
+**Resolution**: `transformers==4.57.1`, a ceiling as much as a pin. Verified on the host that the video
+half is unaffected — `WanVideoPipeline`, `ModelConfig`, `wan_video_dit_s2v` and `Wav2Vec2Model` all
+import on 4.57.1. `diffsynth` declares transformers with no bound; its 5.x-only imports (Qwen3_5,
+Qwen3VL, Ministral3, DINOv3, Siglip2) are lazy and belong to pipelines this application never loads.
+
+**Second-order consequence, and the non-obvious one.** transformers 4.57.1 requires
+`huggingface-hub<1.0`; gradio 6.x requires `huggingface-hub>=1.16`. They cannot coexist, so gradio is
+pinned `>=5.49,<6` — a **ceiling**, where the file previously carried a floor of `>=4.44`. The trap is
+the direction of the failure: raising gradio to 6.x breaks **voice**, not the UI, which is not where
+anyone would look. Both `requirements.txt` and this section say so for that reason.
+
+`torchcodec==0.16.0` is additionally required, because coqui-tts enforces it at import time from
+torch>=2.9. Installed as the plain wheel rather than through `coqui-tts[codec]`, on the same reasoning
+that keeps the voice requirement extras-free: the extra resolves through Coqui's cu128 index.
+
+Two H3-era packages were removed as unused and unreferenced by any application module: `diffusers`
+(replaced by diffsynth) and `hf-gradio` (a gradio 6 companion). `pip check` is clean.
+
+**Verified on the host after the change**: torch `2.13.0+cu130`, CUDA available, capability `(12, 0)` —
+`sm_120` intact, which was the property every packaging decision here was protecting.
+
+**Constraint inherited by T040**: Arabic has a **166-character** per-generation limit
+(`TTS/tts/layers/xtts/tokenizer.py`, `char_limits["ar"]`). Longer scripts must be sentence-split —
+`pysbd` is already a coqui-tts core dependency — and the segments concatenated before the waveform is
+measured and handed to Wan. This is a measured model constraint and belongs in the adapter's profile,
+never as a literal in application code.
+
+## Wan2.2-S2V on the RTX 5080: measured, and blocked (2026-09-01)
+
+**Status**: the VIDEO role is **unresolved**. Every other part of the stack is proven on the host.
+Six configurations were run; none produced a single denoising step. The obstacle is measured and
+attributed, and it is **not** the model.
+
+### What works
+
+| Stage | Result |
+|---|---|
+| FFmpeg 9.0.1 shared libraries | installed, torchcodec loads |
+| XTTS-v2 Arabic | **PASS** -- 47.5 s from a 329-char script, 24 kHz, 0.25x realtime, 2.69 GiB VRAM, judged acceptable by the operator |
+| Arabic splitting | 329 chars -> 2 segments (162 + 166), no text lost |
+| Download | **45.77 GiB / 49 files in 13.7 min** |
+| Wan pipeline load | **PASS** -- 44 s, 11.45 GiB host RSS |
+| Audio conditioning, VAE encode | reached and working (VAE encode 4 chunks in 11 s) |
+
+### What does not
+
+Six runs, one signature, no denoising step completed in any of them:
+
+| # | Quantize | Offload | Resolution | Frames | Steps | Peak VRAM | Power | Outcome |
+|---|---|---|---|---|---|---|---|---|
+| 1 | none (bf16) | cpu | 448x832 | 81 | 40 | 15.9 GiB | 60 W | no step in 26 min |
+| 2 | int8 w8a16 | cpu | 448x832 | 81 | 4 | 15.86 GiB | 61 W | no step in ~12 min |
+| 3 | none (bf16) | cpu | 320x576 | 33 | 8 | 15.8 GiB | 61 W | no step |
+| 4 | int4 w4a16 | cuda | -- | -- | -- | -- | -- | load error (sharded) |
+| 5 | int4 w4a16 | cuda | -- | -- | -- | -- | -- | load error (merged), then `mslk` missing |
+| 6 | int8 w8a16 | cuda | 320x576 | 33 | 8 | 15.85 GiB | 61-64 W | no step |
+
+**int8 changed peak VRAM by 0.04 GiB. A 5x cut in activation budget changed it by 0.1 GiB.** VRAM
+pins at ~15.8 GiB regardless, because DiffSynth's `vram_limit` manager simply fills the card with
+cached layers. Neither weights nor activations are the constraint.
+
+### The actual bottleneck, and why it is not the hardware
+
+Profiling during run 3 -- 20 seconds of measurement that was worth more than two of the runs above:
+
+* disk read **0.2 MB/s** -- not paging; host RAM pressure was a red herring
+* process CPU **99-100% of one core**
+* GPU **100% "utilisation" at 61 W** of a ~360 W card, 2910 MHz, 37 C
+
+That is a CPU-bound, Python-orchestrated per-layer transfer loop with the GPU starved between
+copies. Host-to-device bandwidth was then measured directly on this host:
+
+| Path | Measured |
+|---|---|
+| pageable | **8.1 GB/s** |
+| pinned | **36.8 GB/s** (PCIe 5.0 x16) |
+
+Streaming the full bf16 DiT (~28 GiB) once per step should therefore cost **0.76 s** pinned or
+**3.5 s** pageable. Observed: **>1200 s**. The implementation is roughly **350x slower than the
+worst-case bandwidth allows**, so the 64 GiB of host RAM and the PCIe link are both adequate and
+neither is implicated. `diffsynth==2.1.5`'s offload orchestration is.
+
+Run 6 also shows `offload_device="cuda"` does not make the model resident: process RSS stayed at
+19.8 GiB and the signature was unchanged. `enable_vram_management` streams regardless of the
+device asked for.
+
+### Two upstream defects found
+
+**1. `DiskMap` corrupts CUDA tensors.** `diffsynth/core/vram/disk_map.py` re-opens the safetensors
+handle every ~1 GiB (`flush_files`, `buffer_size=10**9`). Tensors already returned are protected
+only on the CPU path:
+
+```python
+if isinstance(param, torch.Tensor) and param.device.type == "cpu":
+    param = param.clone()
+```
+
+CUDA tensors are not cloned, so re-opening frees their storage underneath them and the next access
+raises `RuntimeError: Attempted to access the data pointer on an invalid python storage`. Sharding
+is irrelevant -- a single merged 30.35 GiB file fails identically, which is how the real cause was
+found. Workaround, verified to get past it: `DIFFSYNTH_DISK_MAP_BUFFER_SIZE=100000000000000`.
+`safetensors` 0.8.0 itself loads to CUDA correctly; the bug is DiffSynth's.
+
+**2. `torchao_int4_w4a16` needs an absent kernel package**, `ImportError: Requires mslk >= 1.0.0`.
+Not pursued, because run 6 showed int8-resident makes no difference anyway.
+
+### Windows-specific hazard worth remembering
+
+The first bf16 attempt, with `offload_device` left at DiffSynth's `None` default, put every
+parameter on CUDA and peaked at **41.89 GiB on a 16 GiB card**. It did not fail: WDDM silently
+spills to shared system memory, so the load "succeeds" and then runs over PCIe. **On Windows the
+OOM you want does not happen** -- it becomes a silent performance collapse instead. Explicit
+placement is mandatory, not a tuning preference.
+
+### A hidden network download at load time
+
+Found by noticing an untracked `models/` directory after the runs, not by any check:
+
+```
+models/Wan-AI/Wan2.1-T2V-1.3B/google/umt5-xxl/{tokenizer.json,spiece.model,...}
+```
+
+`WanVideoPipeline.from_pretrained` takes a `tokenizer_config` whose **default is not None**:
+`ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/")`. Leaving it
+unset makes DiffSynth resolve and **download the umt5 tokenizer from the network at load time**,
+into `./models` (its `local_model_path` default), even though every other component was pinned to a
+local path and the full repository was already on disk.
+
+This directly violates T093's "zero hidden downloads during inference" and the closed-model policy
+in `closed-models.md`. It is also invisible: 21 MiB, no progress output, no error.
+
+Whatever runtime is chosen, the adapter must pass an explicit local `tokenizer_config` and the
+acceptance test must assert that no network call occurs during a generation -- an assertion the
+current gate does not make, because the gate only inspects package contents and repository
+metadata, never a live load.
+
+### Consequences for the profile and the architecture
+
+* `frame_rate`, resolutions, `duration_range_seconds` and step count remain **unmeasured**. Nothing
+  from the vendor table below has been confirmed by a generation, so none of it may enter a profile.
+* The **13.5 GiB reserved ceiling is breached by every configuration tried** (15.8-41.9 GiB), so
+  even a working run would currently fail the resource contract.
+* The measured working set is **45.77 GiB / 49 files**, not the 42.60 GiB / 15 files recorded from
+  the Hugging Face API below. The audio encoder ships its weights three times -- `model.safetensors`,
+  `pytorch_model.bin` and `flax_model.msgpack`, ~1.26 GiB each -- and only the safetensors copy is
+  loaded. Published metadata was wrong; the measurement stands.
+* Arabic carries a **166-character** per-generation limit into T040 regardless of which video
+  runtime is chosen.
+
+### Open decision
+
+The weights are not implicated and the hardware is not implicated, so **replacing the model is not
+the indicated fix**. The candidate is replacing the *runtime*: ComfyUI's native Wan S2V nodes, with
+GGUF Q4/Q5 quantization, are the established path for 16 GiB cards. That is an architectural change
+rather than a pin change -- DiffSynth is consumed as a library, while ComfyUI would be driven as a
+subprocess, which touches the adapter design and the closed-set review in `closed-models.md`. The
+alternative is a smaller audio-driven model that runs in-process. Not yet decided.
 
 ## Measured constants for the Wan2.2-S2V profile (2026-09-01)
 
