@@ -1,0 +1,41 @@
+{
+  "prompt_id": "ad16d68c-5749-4e77-bfa7-855de827bab4",
+  "status": "success",
+  "completed": true,
+  "seconds": 30.0,
+  "seconds_per_step": 3.8,
+  "config": {
+    "frames": 33,
+    "width": 320,
+    "height": 576,
+    "steps": 8,
+    "dit": "wan2.2_s2v_14B_fp8_scaled.safetensors"
+  },
+  "outputs": [
+    "wan-s2v-probe_00001_.mp4"
+  ],
+  "messages": [
+    [
+      "execution_start",
+      {
+        "prompt_id": "ad16d68c-5749-4e77-bfa7-855de827bab4",
+        "timestamp": 1788280582139
+      }
+    ],
+    [
+      "execution_cached",
+      {
+        "nodes": [],
+        "prompt_id": "ad16d68c-5749-4e77-bfa7-855de827bab4",
+        "timestamp": 1788280582149
+      }
+    ],
+    [
+      "execution_success",
+      {
+        "prompt_id": "ad16d68c-5749-4e77-bfa7-855de827bab4",
+        "timestamp": 1788280610755
+      }
+    ]
+  ]
+}

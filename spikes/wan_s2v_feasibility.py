@@ -401,7 +401,14 @@ def frames_for(seconds: float, fps: float = CLAIMED_FRAME_RATE) -> int:
 # --------------------------------------------------------------------------
 
 
-def stage_voice(report: Report, out_dir: Path, reference_wav: Path | None) -> Path | None:
+def stage_voice(
+    report: Report,
+    out_dir: Path,
+    reference_wav: Path | None,
+    script: str | None = None,
+    language: str = "ar",
+    out_name: str = "speech-ar.wav",
+) -> Path | None:
     """Synthesize Arabic and measure it. Returns the speech path, or None.
 
     Pass criterion is deliberately weak on quality and strict on mechanics: this
@@ -417,8 +424,10 @@ def stage_voice(report: Report, out_dir: Path, reference_wav: Path | None) -> Pa
         import torch
         from TTS.api import TTS
 
-        segments = split_for_arabic(ARABIC_SCRIPT)
-        stage.measurements["script_chars"] = len(ARABIC_SCRIPT)
+        text = (script or ARABIC_SCRIPT).strip()
+        segments = split_for_arabic(text)
+        stage.measurements["script_chars"] = len(text)
+        stage.measurements["language"] = language
         stage.measurements["segments"] = len(segments)
         stage.measurements["segment_lengths"] = [len(s) for s in segments]
         _log(f"Arabic script split into {len(segments)} segment(s) under {ARABIC_CHAR_LIMIT} chars")
@@ -447,13 +456,13 @@ def stage_voice(report: Report, out_dir: Path, reference_wav: Path | None) -> Pa
         synth_started = time.monotonic()
         for index, segment in enumerate(segments, start=1):
             _log(f"synthesizing segment {index}/{len(segments)}")
-            wav = tts.tts(text=segment, speaker_wav=str(reference_wav), language="ar")
+            wav = tts.tts(text=segment, speaker_wav=str(reference_wav), language=language)
             pieces.append(np.asarray(wav, dtype="float32"))
             rate = tts.synthesizer.output_sample_rate
         stage.measurements["synthesis_seconds"] = round(time.monotonic() - synth_started, 1)
 
         speech = np.concatenate(pieces) if len(pieces) > 1 else pieces[0]
-        speech_path = out_dir / "speech-ar.wav"
+        speech_path = out_dir / out_name
         sf.write(speech_path, speech, rate)
 
         facts = _wav_facts(speech_path)
@@ -478,7 +487,7 @@ def stage_voice(report: Report, out_dir: Path, reference_wav: Path | None) -> Pa
             stage.verdict = "fail"
             stage.reason = (
                 f"synthesized only {facts['seconds']}s "
-                f"for a {len(ARABIC_SCRIPT)}-char script"
+                f"for a {len(text)}-char script"
             )
             return None
 
@@ -846,6 +855,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--model-path", type=Path, default=Path("D:/Yousef/Wan2.2-S2V-14B"))
     parser.add_argument("--reference-audio", type=Path, default=None, help="speaker WAV to clone")
+    parser.add_argument(
+        "--script",
+        default=None,
+        help=(
+            "text to speak. Defaults to the built-in Arabic sample. Long text is "
+            "split automatically at the language's character limit; nothing is "
+            "truncated."
+        ),
+    )
+    parser.add_argument(
+        "--script-file",
+        type=Path,
+        default=None,
+        help="read the text from a UTF-8 file instead of --script. Prefer this on "
+        "Windows, where a cp1252 console mangles Arabic typed on the command line.",
+    )
+    parser.add_argument("--language", default="ar", help="XTTS language code, e.g. ar, en, fr")
+    parser.add_argument(
+        "--voice-out", default="speech-ar.wav", help="output filename inside --out-dir"
+    )
     parser.add_argument("--image", type=Path, default=None, help="conditioning portrait")
     parser.add_argument(
         "--speech", type=Path, default=None, help="reuse a speech WAV from a prior run"
@@ -926,7 +955,17 @@ def main(argv: list[str] | None = None) -> int:
     speech_path = args.speech
 
     if "voice" in wants:
-        produced = stage_voice(report, args.out_dir, args.reference_audio)
+        script = args.script
+        if args.script_file is not None:
+            script = args.script_file.read_text(encoding="utf-8")
+        produced = stage_voice(
+            report,
+            args.out_dir,
+            args.reference_audio,
+            script,
+            args.language,
+            args.voice_out,
+        )
         speech_path = speech_path or produced
 
     if "download" in wants and not stage_download(report, args.model_path):
