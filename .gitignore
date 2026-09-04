@@ -22,6 +22,7 @@ outputs/*
 # Spike artifacts. Disposable probes write here; their conclusions belong in
 # research.md, not in the repository as loose files.
 spike-report*.json
+comfy-report*.json
 spike-out/
 spike-*.log
 

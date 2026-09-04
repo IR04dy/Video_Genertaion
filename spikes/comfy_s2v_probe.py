@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -34,16 +36,40 @@ DIT = "wan2.2_s2v_14B_fp8_scaled.safetensors"
 TEXT_ENCODER = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 VAE = "wan_2.1_vae.safetensors"
 AUDIO_ENCODER = "wav2vec2_large_english_fp16.safetensors"
+LORA = "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors"
 
-POSITIVE = "a person speaking to the camera, natural head movement, soft indoor lighting"
-NEGATIVE = "blurry, distorted face, static, watermark, text"
+# Defaults tuned against an observed failure, not guessed: every run so far has
+# hallucinated a hand entering frame despite a head-only prompt, so limbs are
+# named explicitly in the negative and stillness is asserted in the positive.
+POSITIVE = (
+    "a man speaking directly to the camera, calm natural facial expression, "
+    "subtle head motion only, body still, steady locked-off camera, sharp focus, "
+    "plain wall background, soft even indoor lighting, photorealistic"
+)
+NEGATIVE = (
+    "hands, arms, gesturing, raised hand, fingers, pointing, extra limbs, "
+    "moving camera, zoom, pan, changing identity, morphing face, distorted face, "
+    "warped features, blurry, waxy skin, flicker, watermark, text, low quality"
+)
 
 
 def build_workflow(
-    *, audio: str, image: str, width: int, height: int, frames: int, steps: int, seed: int
+    *,
+    audio: str,
+    image: str,
+    width: int,
+    height: int,
+    frames: int,
+    steps: int,
+    seed: int,
+    shift: float,
+    cfg: float,
+    lora_strength: float,
+    positive: str,
+    negative: str,
 ) -> dict:
     """The API-format graph. Node ids are strings; links are [node_id, slot]."""
-    return {
+    graph = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": DIT, "weight_dtype": "default"}},
         "2": {
             "class_type": "CLIPLoader",
@@ -60,8 +86,8 @@ def build_workflow(
             "class_type": "AudioEncoderEncode",
             "inputs": {"audio_encoder": ["4", 0], "audio": ["5", 0]},
         },
-        "8": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": POSITIVE}},
-        "9": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": NEGATIVE}},
+        "8": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": positive}},
+        "9": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative}},
         "10": {
             "class_type": "WanSoundImageToVideo",
             "inputs": {
@@ -76,16 +102,32 @@ def build_workflow(
                 "ref_image": ["6", 0],
             },
         },
+        # The template's chain is UNETLoader -> LoraLoaderModelOnly ->
+        # ModelSamplingSD3 -> KSampler. The LoRA is a distillation, so it changes
+        # the sampling trajectory, not merely the speed; running without it is a
+        # different configuration, not a slower one.
+        "16": {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {"model": ["1", 0], "lora_name": LORA, "strength_model": lora_strength},
+        },
+        # ModelSamplingSD3 sets the flow-matching sigma shift. Wan needs it and
+        # ComfyUI's own Wan S2V template sets shift=8; omitting the node leaves
+        # the default schedule, which produced identity drift, warped background
+        # text and unstable framing at 40 steps. Not optional.
+        "15": {
+            "class_type": "ModelSamplingSD3",
+            "inputs": {"model": ["16", 0] if lora_strength > 0 else ["1", 0], "shift": shift},
+        },
         "11": {
             "class_type": "KSampler",
             "inputs": {
-                "model": ["1", 0],
+                "model": ["15", 0],
                 "positive": ["10", 0],
                 "negative": ["10", 1],
                 "latent_image": ["10", 2],
                 "seed": seed,
                 "steps": steps,
-                "cfg": 6.0,
+                "cfg": cfg,
                 "sampler_name": "uni_pc",
                 "scheduler": "simple",
                 "denoise": 1.0,
@@ -102,6 +144,70 @@ def build_workflow(
                        "codec": "auto"},
         },
     }
+    if lora_strength <= 0:
+        del graph["16"]
+    return graph
+
+
+class VramSampler:
+    """Poll GPU memory from outside the ComfyUI process while it generates.
+
+    Peak VRAM cannot be read from this process -- the allocator lives in the
+    ComfyUI server -- so it is sampled through nvidia-smi instead. That measures
+    the whole device rather than one allocator, which is the right number here:
+    the 13.5 GiB ceiling in `config.py` is about what the card can be asked to
+    hold, not about who allocated it.
+    """
+
+    def __init__(self, interval: float = 2.0) -> None:
+        self.interval = interval
+        self.samples: list[tuple[int, float]] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                out = subprocess.run(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=memory.used,power.draw",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                used, power = out.stdout.strip().split(",")
+                self.samples.append((int(used), float(power)))
+            except Exception:  # noqa: BLE001 - sampling must never break the run
+                pass
+            self._stop.wait(self.interval)
+
+    def __enter__(self) -> VramSampler:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def summary(self) -> dict:
+        if not self.samples:
+            return {}
+        mib = [s[0] for s in self.samples]
+        watts = [s[1] for s in self.samples]
+        peak = max(mib)
+        return {
+            "samples": len(mib),
+            "peak_vram_mib": peak,
+            "peak_vram_gib": round(peak / 1024, 2),
+            "mean_vram_gib": round(sum(mib) / len(mib) / 1024, 2),
+            "peak_power_w": max(watts),
+            "mean_power_w": round(sum(watts) / len(watts), 1),
+            "ceiling_gib": 13.5,
+            "within_ceiling": peak / 1024 <= 13.5,
+        }
 
 
 def post(path: str, payload: dict) -> dict:
@@ -128,6 +234,22 @@ def main() -> int:
     parser.add_argument("--frames", type=int, default=33, help="must be 4n+1")
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--shift",
+        type=float,
+        default=8.0,
+        help="flow-matching sigma shift (ModelSamplingSD3). ComfyUI's Wan S2V "
+        "template uses 8.0; the node default of 3.0 is NOT right for this model.",
+    )
+    parser.add_argument("--cfg", type=float, default=6.0)
+    parser.add_argument("--positive", default=POSITIVE)
+    parser.add_argument("--negative", default=NEGATIVE)
+    parser.add_argument(
+        "--lora-strength",
+        type=float,
+        default=1.0,
+        help="LightX2V distillation LoRA strength; 0 disables the node entirely.",
+    )
     parser.add_argument("--report", type=Path, default=Path("comfy-report.json"))
     args = parser.parse_args()
 
@@ -143,29 +265,40 @@ def main() -> int:
         frames=args.frames,
         steps=args.steps,
         seed=args.seed,
+        shift=args.shift,
+        cfg=args.cfg,
+        lora_strength=args.lora_strength,
+        positive=args.positive,
+        negative=args.negative,
     )
 
-    print(f"[probe] {args.frames} frames at {args.width}x{args.height}, {args.steps} steps",
-          flush=True)
+    print(
+        f"[probe] {args.frames} frames at {args.width}x{args.height}, "
+        f"{args.steps} steps, shift {args.shift}, cfg {args.cfg}, "
+        f"lora {args.lora_strength}",
+        flush=True,
+    )
     started = time.time()
-    try:
-        queued = post("/prompt", {"prompt": workflow, "client_id": client_id})
-    except urllib.error.HTTPError as error:
-        body = error.read().decode("utf-8", "replace")
-        raise SystemExit(f"ComfyUI rejected the workflow:\n{body}") from error
+    with VramSampler() as sampler:
+        try:
+            queued = post("/prompt", {"prompt": workflow, "client_id": client_id})
+        except urllib.error.HTTPError as error:
+            body = error.read().decode("utf-8", "replace")
+            raise SystemExit(f"ComfyUI rejected the workflow:\n{body}") from error
 
-    prompt_id = queued["prompt_id"]
-    print(f"[probe] queued {prompt_id}", flush=True)
+        prompt_id = queued["prompt_id"]
+        print(f"[probe] queued {prompt_id}", flush=True)
 
-    # Poll rather than open a websocket: fewer moving parts, and the only thing
-    # needed is the terminal state plus wall-clock.
-    while True:
-        history = get(f"/history/{prompt_id}")
-        if prompt_id in history:
-            break
-        time.sleep(5)
+        # Poll rather than open a websocket: fewer moving parts, and the only
+        # thing needed is the terminal state plus wall-clock.
+        while True:
+            history = get(f"/history/{prompt_id}")
+            if prompt_id in history:
+                break
+            time.sleep(5)
 
     elapsed = time.time() - started
+    vram = sampler.summary()
     entry = history[prompt_id]
     status = entry.get("status", {})
     outputs = entry.get("outputs", {})
@@ -188,8 +321,14 @@ def main() -> int:
             "width": args.width,
             "height": args.height,
             "steps": args.steps,
+            "shift": args.shift,
+            "cfg": args.cfg,
+            "lora_strength": args.lora_strength,
+            "positive": args.positive,
+            "negative": args.negative,
             "dit": DIT,
         },
+        "vram": vram,
         "outputs": files,
         "messages": status.get("messages", [])[-6:],
     }
@@ -197,6 +336,11 @@ def main() -> int:
 
     print(f"[probe] {status.get('status_str')} in {elapsed / 60:.1f} min "
           f"({elapsed / args.steps:.1f}s/step)", flush=True)
+    if vram:
+        verdict = "WITHIN" if vram["within_ceiling"] else "OVER"
+        print(f"[probe] peak VRAM {vram['peak_vram_gib']} GiB "
+              f"({verdict} the 13.5 GiB ceiling), mean power {vram['mean_power_w']} W",
+              flush=True)
     for name in files:
         print(f"[probe] output: {name}", flush=True)
     return 0 if status.get("status_str") == "success" else 1
